@@ -1,6 +1,7 @@
 import os
 import requests
 import yaml
+import re
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -16,6 +17,37 @@ HEADERS = {
 }
 
 
+def validate_step(exec_script: str) -> str:
+    """
+    Validate and auto-fix unsafe or non-idempotent commands.
+    """
+
+    lines = exec_script.split("\n")
+    fixed_lines = []
+
+    for line in lines:
+        stripped = line.strip()
+
+        # 🔒 Block absolute paths anywhere
+        if re.search(r"\s/+", stripped) or stripped.startswith("/"):
+            raise ValueError("Unsafe script: absolute paths are not allowed.")
+
+        # 🔒 Block dangerous commands
+        blocked = ["sudo", "systemctl", "service", "docker", "rm -rf /"]
+        for word in blocked:
+            if word in stripped:
+                raise ValueError(f"Unsafe script: contains blocked command '{word}'.")
+
+        # 🔧 Auto-fix mkdir to mkdir -p
+        if stripped.startswith("mkdir ") and "-p" not in stripped:
+            line = line.replace("mkdir ", "mkdir -p ", 1)
+
+        fixed_lines.append(line)
+
+    return "\n".join(fixed_lines)
+
+
+
 def create_dynamic_job(ai_definition: dict) -> dict:
 
     commands = ai_definition.get("sequence", {}).get("commands", [])
@@ -23,12 +55,20 @@ def create_dynamic_job(ai_definition: dict) -> dict:
     if not commands:
         return {"error": True, "message": "No workflow steps generated."}
 
-    steps = []
+    steps = [{
+    "description": "Initialize release directory",
+    "exec": "mkdir -p ${option.environment}/releases/${option.version}"
+    }]
+
 
     for step in commands:
         exec_script = step.get("exec", "").strip()
         if not exec_script:
             continue
+
+        # 🔒 Validate before sending
+        exec_script = validate_step(exec_script)
+
 
         steps.append({
             "description": step.get("description", "Step"),
@@ -44,7 +84,6 @@ def create_dynamic_job(ai_definition: dict) -> dict:
         "scheduleEnabled": False,
         "nodeFilterEditable": False,
 
-        # FORCE local node execution
         "nodefilters": {
             "dispatch": {
                 "threadcount": 1,
@@ -53,7 +92,6 @@ def create_dynamic_job(ai_definition: dict) -> dict:
             "filter": "name: .*"
         },
 
-        # JOB OPTIONS
         "options": [
             {
                 "name": "environment",

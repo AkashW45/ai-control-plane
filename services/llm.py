@@ -12,7 +12,7 @@ MODEL = os.getenv("OLLAMA_MODEL", "llama3")
 def analyze_ticket(ticket: dict) -> dict:
     """
     Generate stable, container-safe runbook workflow.
-    No conditional logic.
+    Strictly relative paths only.
     """
 
     prompt = f"""
@@ -31,11 +31,15 @@ STRICT RULES:
 - No export.
 - No systemctl, service, sudo, docker, git.
 - Allowed commands: echo, sleep, mkdir, touch, ls, date, whoami.
-- Each step must reference:
+- NEVER use absolute paths (no path starting with /).
+- NEVER write outside working directory.
+- All directories must start with:
+    ${{option.environment}}/releases/${{option.version}}
+- Each command must be on its own line.
+- Every step must reference:
     ${{option.environment}}
     ${{option.version}}
     ${{option.dry_run}}
-- Each command must be on its own line.
 
 Schema:
 
@@ -76,4 +80,6 @@ Description: {ticket.get("description")}
     if not raw_output:
         raise ValueError("LLM returned empty response")
 
-    return json.loads(raw_output)
+    parsed = json.loads(raw_output)
+
+    return parsed
