@@ -57,8 +57,13 @@ def create_dynamic_job(ai_definition: dict) -> dict:
 
     steps = [{
     "description": "Initialize release directory",
-    "exec": "mkdir -p ${option.environment}/releases/${option.version}"
-    }]
+    "exec": """
+echo "Initializing release directory"
+mkdir -p ${option.environment}/releases/${option.version}
+echo "Base directory ready"
+"""
+}]
+
 
 
     for step in commands:
@@ -70,10 +75,17 @@ def create_dynamic_job(ai_definition: dict) -> dict:
         exec_script = validate_step(exec_script)
 
 
-        steps.append({
-            "description": step.get("description", "Step"),
-            "exec": exec_script
-        })
+        wrapped = f"""
+echo "---- {step.get('description')} START ----"
+{exec_script}
+echo "---- {step.get('description')} END ----"
+"""
+
+    steps.append({
+    "description": step.get("description", "Step"),
+    "exec": wrapped
+})
+
 
     job_yaml = [{
         "name": ai_definition.get("name", "AI Runbook"),
