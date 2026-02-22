@@ -4,33 +4,37 @@
     <title>Job Preview</title>
     <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/css/bootstrap.min.css" rel="stylesheet">
 </head>
-<body class="bg-light">
+<body class="bg-light p-5">
 
-<div class="container mt-5">
-    <div class="card shadow">
-        <div class="card-body">
+<div class="container">
 
-            <h3>Job Preview</h3>
-            <p><strong>Name:</strong> {{ preview.name }}</p>
-            <p><strong>Description:</strong> {{ preview.description }}</p>
+    <h2>Job Preview</h2>
 
-            <h5>Steps</h5>
-            <ul class="list-group">
-                {% for step in preview.steps %}
-                <li class="list-group-item">
-                    <strong>{{ step.description }}</strong>
-                    <pre class="mt-2">{{ step.command }}</pre>
-                </li>
-                {% endfor %}
-            </ul>
+    <p><strong>Name:</strong> {{ name }}</p>
+    <p><strong>Description:</strong> {{ description }}</p>
 
-            <div class="mt-4">
-                <a href="/" class="btn btn-secondary">Back</a>
-                <a href="http://localhost" class="btn btn-success">Continue to Rundeck</a>
-            </div>
+    <h4>Steps</h4>
+    <ul class="list-group mb-4">
+        {% for cmd in commands %}
+        <li class="list-group-item">
+            <code>{{ cmd }}</code>
+        </li>
+        {% endfor %}
+    </ul>
 
-        </div>
-    </div>
+    <!-- Create Job -->
+    <form method="post" action="/create-job">
+        <input type="hidden" name="name" value="{{ name }}">
+        <input type="hidden" name="description" value="{{ description }}">
+        <input type="hidden" name="commands" value="{{ commands | join('|||') }}">
+
+        <button type="submit" class="btn btn-success">
+            Confirm & Create in Rundeck
+        </button>
+    </form>
+
+    <a href="/" class="btn btn-secondary mt-3">Back</a>
+
 </div>
 
 </body>
