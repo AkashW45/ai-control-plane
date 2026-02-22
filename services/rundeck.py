@@ -40,11 +40,19 @@ def build_job_yaml(ticket: dict, plan: dict):
     steps = []
 
     for step in plan["steps"]:
-        script = "\n".join(step["commands"])
+
+        # Replace old syntax with documented script syntax
+        script_lines = []
+        for cmd in step["commands"]:
+            cmd = cmd.replace("${option.environment}", "@option.environment@")
+            cmd = cmd.replace("${option.version}", "@option.version@")
+            script_lines.append(cmd)
+
+        script_content = "\n".join(script_lines)
 
         steps.append({
             "description": step["description"],
-            "exec": LiteralString(script)
+            "script": LiteralString(script_content)
         })
 
     job_yaml = [{
