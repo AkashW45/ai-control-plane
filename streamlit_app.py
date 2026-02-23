@@ -1,11 +1,11 @@
 import streamlit as st
-import json
 import os
-import time
 
 from services.jira import get_ticket
-from services.llm import analyze_ticket
+from services.llm import analyze_ticket, build_execution_brief
 from services.rundeck import build_job_yaml, import_job, run_job, get_execution_state
+from services.rundeck import get_execution_output
+import time
 
 st.set_page_config(layout="wide")
 st.title("AI Control Plane")
@@ -20,6 +20,11 @@ if st.button("Fetch Jira"):
         ticket = get_ticket(jira_key)
         st.session_state["ticket"] = ticket
         st.success("Jira ticket loaded")
+
+        # Auto-generate execution brief from Jira
+        execution_brief = build_execution_brief(ticket)
+        st.session_state["execution_brief"] = execution_brief
+
     except Exception as e:
         st.error(str(e))
 
@@ -33,7 +38,6 @@ if "ticket" in st.session_state:
     st.subheader("Jira Overview")
 
     col1, col2, col3, col4 = st.columns(4)
-
     col1.metric("Project", ticket["project"])
     col2.metric("Status", ticket["status"])
     col3.metric("Priority", ticket["priority"])
@@ -45,22 +49,42 @@ if "ticket" in st.session_state:
     st.markdown("### Description")
     st.write(ticket["description"] or "No description")
 
-    with st.expander("Full Jira Metadata"):
-        st.json(ticket)
+# --------------------------
+# 3️⃣ Execution Intent Editor
+# --------------------------
+if "execution_brief" in st.session_state:
 
-    # --------------------------
-    # 3️⃣ Generate AI Plan
-    # --------------------------
+    st.subheader("Execution Intent (Editable)")
+
+    edited_brief = st.text_area(
+        "Modify or refine what should be executed:",
+        value=st.session_state["execution_brief"],
+        height=200
+    )
+
+    additional_notes = st.text_area(
+        "Additional Instructions (Optional)",
+        placeholder="Example: include rollback, validate release folder, add timestamp log..."
+    )
+
+    final_prompt = edited_brief.strip()
+
+    if additional_notes:
+        final_prompt += "\n\nAdditional Notes:\n" + additional_notes.strip()
+
     if st.button("Generate AI Workflow"):
 
-        with st.spinner("Analyzing ticket..."):
-            plan = analyze_ticket(ticket)
+        with st.spinner("Generating runbook plan..."):
+            plan = analyze_ticket(
+                st.session_state["ticket"],
+                final_prompt
+            )
             st.session_state["plan"] = plan
 
         st.success("AI Workflow Generated")
 
 # --------------------------
-# 4️⃣ Runbook Detailed Preview
+# 4️⃣ Runbook Preview
 # --------------------------
 if "plan" in st.session_state:
 
@@ -70,13 +94,9 @@ if "plan" in st.session_state:
 
     for idx, step in enumerate(plan["steps"], start=1):
         st.markdown(f"#### Step {idx}: {step['description']}")
-
         for cmd in step["commands"]:
             st.code(cmd, language="bash")
 
-    # --------------------------
-    # Build YAML
-    # --------------------------
     if st.button("Build Rundeck YAML"):
 
         yaml_payload = build_job_yaml(
@@ -147,14 +167,38 @@ if "job_id" in st.session_state:
 # --------------------------
 # 7️⃣ Execution Status
 # --------------------------
+# --------------------------
+# 8️⃣ Live Execution Logs
+# --------------------------
 if "execution" in st.session_state:
 
     execution_id = st.session_state["execution"]["id"]
 
-    if st.button("Check Execution Status"):
+    st.subheader("Live Execution Logs")
 
-        state = get_execution_state(execution_id)
-        st.json(state)
+    log_placeholder = st.empty()
 
-        if state.get("completed"):
-            st.success(f"Final Status: {state.get('executionState')}")
+    if st.button("Start Live Log Stream"):
+
+        for _ in range(30):  # poll 30 times (~60 seconds)
+            try:
+                output = get_execution_output(execution_id)
+
+                lines = [
+                    entry["log"]
+                    for entry in output.get("entries", [])
+                ]
+
+                log_text = "\n".join(lines)
+
+                log_placeholder.code(log_text)
+
+                if output.get("completed"):
+                    st.success("Execution Completed")
+                    break
+
+                time.sleep(2)
+
+            except Exception as e:
+                st.error(str(e))
+                break

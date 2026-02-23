@@ -123,3 +123,27 @@ def get_execution_state(execution_id):
     response = requests.get(url, headers=HEADERS_JSON)
     response.raise_for_status()
     return response.json()
+
+import requests
+import os
+
+RUNDECK_BASE_URL = os.getenv("RUNDECK_BASE_URL")
+RUNDECK_API_TOKEN = os.getenv("RUNDECK_API_TOKEN")
+
+
+def get_execution_output(execution_id, last_lines=100):
+    url = f"{RUNDECK_BASE_URL}/api/41/execution/{execution_id}/output"
+
+    response = requests.get(
+        url,
+        headers={
+            "X-Rundeck-Auth-Token": RUNDECK_API_TOKEN
+        },
+        params={
+            "format": "json",
+            "lastlines": last_lines
+        }
+    )
+
+    response.raise_for_status()
+    return response.json()

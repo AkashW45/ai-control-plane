@@ -10,14 +10,36 @@ API_KEY = os.getenv("CEREBRAS_API_KEY")
 MODEL = os.getenv("CEREBRAS_MODEL")
 
 
-def analyze_ticket(ticket: dict) -> dict:
-    prompt = f"""
+# -------------------------
+# 1️⃣ Create Jira Execution Brief
+# -------------------------
+def build_execution_brief(ticket: dict) -> str:
+    summary = ticket.get("summary", "")
+    description = ticket.get("description", "")
+    version = ticket.get("fixVersion", "")
+    priority = ticket.get("priority", "")
+
+    return f"""
+Deploy version {version} related to:
+{summary}
+
+Details:
+{description}
+
+Priority: {priority}
+""".strip()
+
+
+# -------------------------
+# 2️⃣ Build Internal Prompt (Hidden)
+# -------------------------
+def build_internal_prompt(final_user_prompt: str) -> str:
+    return f"""
 You are a DevOps automation planner.
 
 Return JSON only.
 
 Schema:
-
 {{
   "steps": [
     {{
@@ -38,17 +60,23 @@ Rules:
   ${{option.environment}}/releases/${{option.version}}
 - No absolute paths
 - No sudo/systemctl/docker
-- Each command separate string
+- Each command must be a separate string
+- Every step must include visible logging using echo
+- Before executing any operation, print what is happening using echo
+- After completing any file operation, print confirmation using echo
+- The final step must print a completion message using echo
 
-Jira Metadata:
-Project: {ticket["project"]}
-Issue Type: {ticket["issuetype"]}
-Priority: {ticket["priority"]}
-Status: {ticket["status"]}
-Version: {ticket["fixVersion"]}
-Summary: {ticket["summary"]}
-Description: {ticket["description"]}
+Execution Intent:
+{final_user_prompt}
 """
+
+
+# -------------------------
+# 3️⃣ Analyze Ticket
+# -------------------------
+def analyze_ticket(ticket: dict, user_prompt: str) -> dict:
+
+    internal_prompt = build_internal_prompt(user_prompt)
 
     response = requests.post(
         BASE_URL,
@@ -58,7 +86,7 @@ Description: {ticket["description"]}
         },
         json={
             "model": MODEL,
-            "messages": [{"role": "user", "content": prompt}],
+            "messages": [{"role": "user", "content": internal_prompt}],
             "temperature": 0.2
         },
         timeout=120
