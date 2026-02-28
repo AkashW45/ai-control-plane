@@ -1,14 +1,22 @@
 import streamlit as st
-import os
+import time
 
 from services.jira import get_ticket
 from services.llm import analyze_ticket, build_execution_brief
-from services.rundeck import build_job_yaml, import_job, run_job, get_execution_state
-from services.rundeck import get_execution_output
-import time
+
+# Rundeck (unchanged)
+from services.rundeck import (
+    build_job_yaml,
+    import_job
+)
+
+from services.executor_factory import get_executor
+from services.notifier import send_execution_email
+
 
 st.set_page_config(layout="wide")
 st.title("AI Control Plane")
+
 
 # --------------------------
 # 1️⃣ Fetch Jira
@@ -21,12 +29,12 @@ if st.button("Fetch Jira"):
         st.session_state["ticket"] = ticket
         st.success("Jira ticket loaded")
 
-        # Auto-generate execution brief from Jira
         execution_brief = build_execution_brief(ticket)
         st.session_state["execution_brief"] = execution_brief
 
     except Exception as e:
         st.error(str(e))
+
 
 # --------------------------
 # 2️⃣ Jira Preview
@@ -49,8 +57,9 @@ if "ticket" in st.session_state:
     st.markdown("### Description")
     st.write(ticket["description"] or "No description")
 
+
 # --------------------------
-# 3️⃣ Execution Intent Editor
+# 3️⃣ Execution Intent
 # --------------------------
 if "execution_brief" in st.session_state:
 
@@ -64,7 +73,7 @@ if "execution_brief" in st.session_state:
 
     additional_notes = st.text_area(
         "Additional Instructions (Optional)",
-        placeholder="Example: include rollback, validate release folder, add timestamp log..."
+        placeholder="Example: include rollback, validate release folder..."
     )
 
     final_prompt = edited_brief.strip()
@@ -83,6 +92,7 @@ if "execution_brief" in st.session_state:
 
         st.success("AI Workflow Generated")
 
+
 # --------------------------
 # 4️⃣ Runbook Preview
 # --------------------------
@@ -97,20 +107,31 @@ if "plan" in st.session_state:
         for cmd in step["commands"]:
             st.code(cmd, language="bash")
 
-    if st.button("Build Rundeck YAML"):
+    executor_choice = st.selectbox(
+        "Select Execution Backend",
+        ["rundeck", "awx"],
+        index=0
+    )
 
-        yaml_payload = build_job_yaml(
-            st.session_state["ticket"],
-            st.session_state["plan"]
-        )
+    st.session_state["selected_executor"] = executor_choice
 
-        st.session_state["yaml"] = yaml_payload
-        st.success("YAML Generated")
+    # Rundeck YAML build remains same
+    if executor_choice == "rundeck":
+        if st.button("Build Rundeck YAML"):
+
+            yaml_payload = build_job_yaml(
+                st.session_state["ticket"],
+                plan
+            )
+
+            st.session_state["yaml"] = yaml_payload
+            st.success("YAML Generated")
+
 
 # --------------------------
-# 5️⃣ YAML Preview
+# 5️⃣ Rundeck YAML Preview
 # --------------------------
-if "yaml" in st.session_state:
+if "yaml" in st.session_state and st.session_state.get("selected_executor") == "rundeck":
 
     st.subheader("Generated Rundeck YAML")
     st.code(st.session_state["yaml"], language="yaml")
@@ -128,10 +149,11 @@ if "yaml" in st.session_state:
             st.error("Import Failed")
             st.json(result)
 
+
 # --------------------------
-# 6️⃣ Execution Panel
+# 6️⃣ Execution Panel (Unified)
 # --------------------------
-if "job_id" in st.session_state:
+if "plan" in st.session_state:
 
     st.subheader("Execute Job")
 
@@ -143,36 +165,51 @@ if "job_id" in st.session_state:
 
     if st.button("Run Job"):
 
-        execution = run_job(
-            st.session_state["job_id"],
+        ticket = st.session_state["ticket"]
+        plan = st.session_state["plan"]
+        executor_type = st.session_state.get("selected_executor", "rundeck")
+
+        executor = get_executor(executor_type)
+
+        execution = executor.run(
+            ticket,
+            plan,
             options={
                 "environment": env_input,
                 "version": version_input,
                 "dry_run": "false"
+            },
+            context={
+                "environment": env_input,
+                "version": version_input
             }
         )
 
         st.session_state["execution"] = execution
-        execution_id = execution["id"]
-
-        base = os.getenv("RUNDECK_BASE_URL")
-        project = os.getenv("RUNDECK_PROJECT")
-
-        execution_link = f"{base}/project/{project}/execution/show/{execution_id}"
+        st.session_state["active_executor"] = executor_type
 
         st.success("Execution Started")
-        st.write("Execution Link:")
-        st.write(execution_link)
+
 
 # --------------------------
-# 7️⃣ Execution Status
-# --------------------------
-# --------------------------
-# 8️⃣ Live Execution Logs
+# 7️⃣ Live Logs (Executor Agnostic)
 # --------------------------
 if "execution" in st.session_state:
 
-    execution_id = st.session_state["execution"]["id"]
+    execution = st.session_state["execution"]
+    executor_type = st.session_state["active_executor"]
+
+    executor = get_executor(executor_type)
+
+    execution_id = execution.get("id") or execution.get("job")
+
+    execution_url = executor.get_execution_url(execution_id)
+
+    st.success("Execution Started")
+    execution_url = executor.get_execution_url(execution_id)
+    st.write("Execution Link:")
+    st.write(execution_url)
+    st.markdown(f"[Open Execution in {executor_type.upper()}]({execution_url})")
 
     st.subheader("Live Execution Logs")
 
@@ -180,21 +217,33 @@ if "execution" in st.session_state:
 
     if st.button("Start Live Log Stream"):
 
-        for _ in range(30):  # poll 30 times (~60 seconds)
+        for _ in range(30):
+
             try:
-                output = get_execution_output(execution_id)
+                status = executor.get_status(execution_id)
+                logs = executor.get_logs(execution_id)
 
-                lines = [
-                    entry["log"]
-                    for entry in output.get("entries", [])
-                ]
+                if isinstance(logs, str):
+                    log_placeholder.code(logs)
+                else:
+                    lines = [entry["log"] for entry in logs.get("entries", [])]
+                    log_placeholder.code("\n".join(lines))
 
-                log_text = "\n".join(lines)
+                if status.get("status") in ["successful", "failed"]:
 
-                log_placeholder.code(log_text)
+                    final_state = status["status"]
+                    st.success(f"Execution Completed: {final_state}")
 
-                if output.get("completed"):
-                    st.success("Execution Completed")
+                    subject = f"{executor_type.upper()} Execution {final_state.upper()}"
+                    body = f"""
+Job: {jira_key}
+State: {final_state}
+
+Logs:
+{logs}
+"""
+
+                    send_execution_email(subject, body)
                     break
 
                 time.sleep(2)

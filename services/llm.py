@@ -45,8 +45,8 @@ Schema:
     {{
       "description": "...",
       "commands": [
-        "shell command",
         "shell command"
+        
       ]
     }}
   ]
@@ -56,14 +56,16 @@ Rules:
 - Exactly 4 steps
 - /bin/sh compatible
 - Allowed: echo, mkdir, touch, ls, date, whoami
-- All paths must start with:
-  ${{option.environment}}/releases/${{option.version}}
+- Use placeholders:
+    {{environment}}
+    {{version}}
+- Example path:
+    {{environment}}/releases/{{version}}
 - No absolute paths
 - No sudo/systemctl/docker
 - Each command must be a separate string
 - Every step must include visible logging using echo
-- Before executing any operation, print what is happening using echo
-- After completing any file operation, print confirmation using echo
+
 - The final step must print a completion message using echo
 
 Execution Intent:

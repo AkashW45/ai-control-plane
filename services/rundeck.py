@@ -35,25 +35,15 @@ def literal_representer(dumper, data):
 yaml.add_representer(LiteralString, literal_representer)
 
 
-def build_job_yaml(ticket: dict, plan: dict):
+def build_job_yaml(ticket: dict, plan: dict, commands=None):
 
-    steps = []
+    if commands is None:
+        commands = []
+        for step in plan["steps"]:
+            commands.extend(step["commands"])
 
-    for step in plan["steps"]:
-
-        # Replace old syntax with documented script syntax
-        script_lines = []
-        for cmd in step["commands"]:
-            cmd = cmd.replace("${option.environment}", "@option.environment@")
-            cmd = cmd.replace("${option.version}", "@option.version@")
-            script_lines.append(cmd)
-
-        script_content = "\n".join(script_lines)
-
-        steps.append({
-            "description": step["description"],
-            "script": LiteralString(script_content)
-        })
+    # Build ONE script step that contains all commands
+    script_content = "\n".join(commands)
 
     job_yaml = [{
         "name": ticket["key"],
@@ -92,7 +82,12 @@ def build_job_yaml(ticket: dict, plan: dict):
         "sequence": {
             "strategy": "node-first",
             "keepgoing": False,
-            "commands": steps
+            "commands": [
+                {
+                    "description": "AI Generated Execution",
+                    "script": LiteralString(script_content)
+                }
+            ]
         }
     }]
 

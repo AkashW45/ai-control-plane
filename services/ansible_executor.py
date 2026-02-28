@@ -4,10 +4,22 @@ import yaml
 import os
 
 
+def substitute_variables(plan: dict, ticket: dict):
+    env = ticket.get("environment", "QA")
+    version = ticket.get("fixVersion", "auto")
+
+    for step in plan["steps"]:
+        for i, cmd in enumerate(step["commands"]):
+            cmd = cmd.replace("${option.environment}", env)
+            cmd = cmd.replace("${option.version}", version)
+            step["commands"][i] = cmd
+
+    return plan
+
+
 def translate_command(cmd: str):
     cmd = cmd.strip()
 
-    # mkdir
     if cmd.startswith("mkdir "):
         path = cmd.replace("mkdir ", "").strip()
         return {
@@ -18,7 +30,6 @@ def translate_command(cmd: str):
             }
         }
 
-    # touch
     if cmd.startswith("touch "):
         path = cmd.replace("touch ", "").strip()
         return {
@@ -29,7 +40,6 @@ def translate_command(cmd: str):
             }
         }
 
-    # echo "text" > file
     if cmd.startswith("echo ") and ">" in cmd:
         parts = cmd.split(">")
         content_part = parts[0].replace("echo", "").strip()
@@ -44,10 +54,9 @@ def translate_command(cmd: str):
             }
         }
 
-    # fallback to command module
     return {
         "name": f"Run command: {cmd}",
-        "command": cmd
+        "shell": cmd
     }
 
 
@@ -61,10 +70,6 @@ def build_playbook(ticket: dict, plan: dict):
     playbook = [{
         "hosts": "localhost",
         "gather_facts": False,
-        "vars": {
-            "deploy_env": "QA",
-            "version": ticket.get("fixVersion", "auto")
-        },
         "tasks": tasks
     }]
 
@@ -72,6 +77,9 @@ def build_playbook(ticket: dict, plan: dict):
 
 
 def run_playbook(ticket: dict, plan: dict):
+    # 🔥 Substitute Rundeck-style variables first
+    plan = substitute_variables(plan, ticket)
+
     playbook_yaml = build_playbook(ticket, plan)
 
     with tempfile.NamedTemporaryFile(mode="w", delete=False, suffix=".yml") as tmp:

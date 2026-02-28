@@ -1,28 +1,42 @@
+# services/job_router.py
+
 import os
 
 
 def route_job(ticket: dict) -> dict:
-    """
-    Dynamically determine Rundeck project from Jira metadata.
-    """
 
-    default_project = os.getenv("RUNDECK_DEFAULT_PROJECT")
+    default_executor = os.getenv("DEFAULT_EXECUTOR", "rundeck")
+    default_rundeck_project = os.getenv("RUNDECK_DEFAULT_PROJECT")
+    default_awx_template = os.getenv("AWX_TEMPLATE_NAME")
 
-    issue_type = (ticket.get("issue_type") or "").lower()
+    issue_type = (ticket.get("issuetype") or "").lower()
     summary = (ticket.get("summary") or "").lower()
     labels = [l.lower() for l in ticket.get("labels", [])]
 
-    # Release-based routing
+    # Example logic
+    if "production" in labels:
+        return {
+            "executor": "awx",
+            "context": {
+                "template_name": default_awx_template
+            }
+        }
+
     if "release" in summary:
-        return {"project": default_project, "job_id": None}
+        return {
+            "executor": "rundeck",
+            "context": {
+                "project": default_rundeck_project
+            }
+        }
 
-    # Database routing
-    if "db" in summary or "database" in summary or "db" in labels:
-        return {"project": default_project, "job_id": None}
-
-    # Bug routing
     if issue_type == "bug":
-        return {"project": default_project, "job_id": None}
+        return {
+            "executor": default_executor,
+            "context": {}
+        }
 
-    # Fallback
-    return {"project": default_project, "job_id": None}
+    return {
+        "executor": default_executor,
+        "context": {}
+    }
