@@ -785,5 +785,130 @@ else:
                     st.error(str(e))
 
         st.divider()
+
+        # ══════════════════════════════════════════════════════
+        # STAGE 5 — DEPLOY TO RUNDECK
+        # ══════════════════════════════════════════════════════
+        st.markdown("## Stage 5 · Deploy to Rundeck")
+        st.caption("Imports the full runbook as a Rundeck job and executes it — requires your approval")
+
+        ticket_s = st.session_state["ticket"]
+        plan_s   = st.session_state["plan"]
+
+        # ── Step 1: Environment + version + approval ──────────
+        if "rundeck_execution_id" not in st.session_state:
+
+            col_env, col_ver = st.columns(2)
+            with col_env:
+                run_env = st.selectbox("Environment", ["QA", "STAGING", "PROD"], key="run_env")
+            with col_ver:
+                run_ver = st.text_input(
+                    "Version",
+                    value=ticket_s.get("fixVersion", "auto"),
+                    key="run_ver"
+                )
+
+            # Show what will be deployed
+            with st.expander("📋 What will be sent to Rundeck", expanded=False):
+                st.write(f"**Job name:** `{ticket_s.get('key', '')}`")
+                st.write(f"**Summary:** {ticket_s.get('summary', '')}")
+                st.write(f"**Steps:** {len(plan_s.get('steps', []))}")
+                for i, step in enumerate(plan_s.get("steps", []), 1):
+                    st.write(f"  {i}. {step.get('description', '')}")
+                    for cmd in step.get("commands", []):
+                        resolved = cmd.replace("{{ environment }}", run_env).replace("{{ version }}", run_ver)
+                        resolved = resolved.replace("{environment}", run_env).replace("{version}", run_ver)
+                        st.code(resolved, language="bash")
+
+            st.markdown("**Confirm you have reviewed the runbook and approve execution:**")
+            approved = st.checkbox("✅ I approve — execute this runbook in Rundeck", key="rundeck_approve")
+
+            if approved:
+                if st.button("🚀 Import & Execute in Rundeck", type="primary", key="run_rundeck_btn"):
+                    with st.spinner("Building job, importing and executing in Rundeck..."):
+                        try:
+                            from services.rundeck_executor import RundeckExecutor
+
+                            executor  = RundeckExecutor()
+                            execution = executor.run(
+                                ticket=ticket_s,
+                                plan=plan_s,
+                                options={
+                                    "environment": run_env,
+                                    "version":     run_ver,
+                                    "dry_run":     "false"
+                                },
+                                context={}
+                            )
+                            execution_id  = execution["id"]
+                            execution_url = executor.get_execution_url(execution_id)
+
+                            st.session_state["rundeck_execution_id"]  = execution_id
+                            st.session_state["rundeck_execution_url"] = execution_url
+                            st.rerun()
+                        except Exception as e:
+                            st.error(str(e))
+
+        # ── Step 2: Execution link + status polling ───────────
+        if "rundeck_execution_id" in st.session_state:
+            execution_id  = st.session_state["rundeck_execution_id"]
+            execution_url = st.session_state.get("rundeck_execution_url", "")
+
+            st.success(f"✅ Execution triggered — ID: `{execution_id}`")
+            st.markdown(f"### 🔗 [View Live Execution in Rundeck]({execution_url})")
+
+            if "rundeck_final_status" not in st.session_state:
+                if st.button("🔄 Check Execution Status", key="poll_rundeck_btn"):
+                    with st.spinner("Polling Rundeck for completion..."):
+                        try:
+                            import time
+                            from services.rundeck import get_execution_state
+                            from services.rundeck import get_execution_output
+
+                            final = None
+                            for _ in range(20):
+                                state = get_execution_state(execution_id)
+                                if state.get("completed"):
+                                    final = state.get("executionState", "unknown")
+                                    break
+                                time.sleep(4)
+
+                            if final:
+                                logs = get_execution_output(execution_id)
+                                st.session_state["rundeck_final_status"] = final
+                                st.session_state["rundeck_logs"]         = logs
+                                st.rerun()
+                            else:
+                                st.info("Still running — click again to re-check")
+                        except Exception as e:
+                            st.error(str(e))
+
+            if "rundeck_final_status" in st.session_state:
+                final = st.session_state["rundeck_final_status"]
+                logs  = st.session_state.get("rundeck_logs", {})
+
+                if final == "SUCCEEDED":
+                    st.success("## ✅ Execution SUCCEEDED")
+                elif final == "FAILED":
+                    st.error("## ❌ Execution FAILED")
+                else:
+                    st.warning(f"## ⚠️ Status: {final}")
+
+                st.markdown(f"**[Open full execution in Rundeck →]({execution_url})**")
+
+                # Clean logs — only actual step output, no system noise
+                log_entries = logs.get("entries", [])
+                clean_lines = [
+                    e.get("log", "").rstrip()
+                    for e in log_entries
+                    if e.get("log", "").strip()
+                    and e.get("type") == "log"
+                    and e.get("stepctx")
+                ]
+                if clean_lines:
+                    with st.expander("📋 Execution Logs", expanded=True):
+                        st.code("\n".join(clean_lines), language="bash")
+
+        st.divider()
         st.markdown("### Pipeline Complete")
         render_progress()
