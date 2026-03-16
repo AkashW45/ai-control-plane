@@ -1,5 +1,9 @@
 import streamlit as st
 import time
+import os
+import json
+import requests
+from dotenv import load_dotenv
 
 from services.jira import get_ticket
 from services.jira_context import build_full_ticket_context
@@ -824,76 +828,38 @@ else:
 
         st.divider()
 
-        # ── Notify Teams ────────────────────────────────────
+        
+
+        # ── Notify Teams ──────────────────────────────────
         st.markdown("### 📣 Notify Team on Microsoft Teams")
-        st.caption("Send release summary with AI recommendation to your Teams channel")
 
-        webhook_url = st.text_input(
-            "Teams Webhook URL",
-            placeholder="https://yourorg.webhook.office.com/...",
-            key="teams_webhook"
-        )
+        teams_webhook_url = os.getenv("TEAMS_WEBHOOK_URL", "")
 
-        if st.button("Send to Microsoft Teams", type="primary", key="send_teams_btn"):
-            if not webhook_url:
-                st.error("Please enter a Teams webhook URL")
-            else:
+        if not teams_webhook_url:
+            st.warning("⚠️ TEAMS_WEBHOOK_URL not set in .env")
+        else:
+            if st.button("📨 Send to Teams", type="primary", key="send_teams_btn"):
                 try:
                     import requests as _req
                     from datetime import datetime
 
-                    plan_s    = st.session_state["plan"]
-                    ticket_s  = st.session_state["ticket"]
-                    sp_sum    = st.session_state.get("sprint_summaries", [])
-                    tickets_str = ", ".join([s["key"] for s in sp_sum]) if sp_sum else ticket_s.get("key","")
-
+                    ticket_s = st.session_state["ticket"]
+                    jira_key = st.session_state.get("jira_key", ticket_s.get("key", ""))
                     verdict_emoji = {"GO": "✅", "PAUSE": "⏸️", "ROLLBACK": "🔴"}.get(verdict, "⏸️")
-                    verdict_color = {"GO": "Good",  "PAUSE": "Warning", "ROLLBACK": "Attention"}.get(verdict, "Warning")
 
-                    reasons_text = "\n".join([f"• {r}" for r in reasons]) if reasons else "—"
-                    conditions_text = "\n".join([f"• {c}" for c in conditions]) if conditions else "None"
-
-                    teams_payload = {
-                        "@type": "MessageCard",
-                        "@context": "http://schema.org/extensions",
-                        "themeColor": {"GO": "00B050", "PAUSE": "FFC000", "ROLLBACK": "FF0000"}.get(verdict, "FFC000"),
-                        "summary": f"AI Recommendation: {verdict} — {ticket_s.get('project','')} Release",
-                        "sections": [
-                            {
-                                "activityTitle": f"{verdict_emoji} AI Recommendation: **{verdict}**",
-                                "activitySubtitle": f"{ticket_s.get('project','')} · {datetime.now().strftime('%Y-%m-%d %H:%M')}",
-                                "activityText": summary,
-                                "facts": [
-                                    {"name": "Tickets",        "value": tickets_str},
-                                    {"name": "Fix Version",    "value": ticket_s.get("fixVersion","")},
-                                    {"name": "Priority",       "value": ticket_s.get("priority","")},
-                                    {"name": "Pods Ready",     "value": f"{rm['pods_ready_percent']}%"},
-                                    {"name": "Error Rate",     "value": f"{rm['error_rate_percent']}%"},
-                                    {"name": "Latency P95",    "value": f"{rm['latency_p95_ms']}ms"},
-                                    {"name": "AI Confidence",  "value": f"{int(confidence*100)}%"},
-                                ],
-                                "markdown": True
-                            },
-                            {
-                                "title": "Recommendation Reasons",
-                                "text": reasons_text
-                            },
-                            {
-                                "title": "Conditions to Resolve" if conditions and verdict != "GO" else "Next Steps",
-                                "text": conditions_text if conditions and verdict != "GO" else "Proceed with deployment as per runbook sequence."
-                            }
-                        ]
+                    pa_payload = {
+                        "change_id": jira_key,
+                        "project":   ticket_s.get("project", ""),
+                        "status":    f"{verdict_emoji} {verdict}",
+                        "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M"),
                     }
 
-                    resp = _req.post(webhook_url, json=teams_payload, timeout=10)
-                    if resp.status_code == 200:
-                        st.success("✅ Message sent to Microsoft Teams successfully")
+                    resp = _req.post(teams_webhook_url, json=pa_payload, timeout=10)
+                    if resp.status_code in (200, 202):
+                        st.success("✅ Sent to Teams")
                     else:
-                        st.error(f"Teams returned {resp.status_code}: {resp.text}")
+                        st.error(f"Failed: {resp.status_code}")
 
                 except Exception as e:
-                    st.error(f"Failed to send: {str(e)}")
-
-        st.divider()
-        st.markdown("### Pipeline Complete")
+                    st.error(str(e))
         render_progress()
