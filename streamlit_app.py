@@ -1,13 +1,10 @@
 import streamlit as st
-import time
 import os
-import json
+from datetime import datetime
 import requests
-from dotenv import load_dotenv
-
 from services.jira import get_ticket
 from services.jira_context import build_full_ticket_context
-from services.jira_search import smart_search, get_project_sprints
+from services.jira_search import smart_search
 from services.llm import analyze_ticket, build_execution_brief, detect_ticket_groups
 from services.test_case_generator import generate_test_cases
 from services.confluence_search import search_confluence, format_confluence_context
@@ -20,14 +17,14 @@ st.caption("Jira-Driven DevOps Automation · Powered by Groq")
 
 
 # ─────────────────────────────────────────────────────────
-# Progress bar across top
+# Progress bar
 # ─────────────────────────────────────────────────────────
 def render_progress():
     stages = [
-        ("1 · Jira",       "ticket"      in st.session_state),
-        ("2 · Test Cases", "test_cases"  in st.session_state),
-        ("3 · Runbook",    "plan"        in st.session_state),
-        ("4 · AI Rec",        "go_no_go"           in st.session_state),
+        ("1 · Jira",       "ticket"    in st.session_state),
+        ("2 · Test Cases", "test_cases" in st.session_state),
+        ("3 · Runbook",    "plan"       in st.session_state),
+        ("4 · AI Rec",     "go_no_go"   in st.session_state),
     ]
     cols = st.columns(len(stages))
     for col, (label, done) in zip(cols, stages):
@@ -50,7 +47,6 @@ st.divider()
 st.markdown("## Stage 1 · Jira Ticket Discovery")
 st.caption("Enter a ticket key directly — or search by keyword and sprint to find related tickets")
 
-# ── Mode tabs ─────────────────────────────────────────────
 mode = st.radio(
     "How do you want to load a ticket?",
     ["🔑 Direct Ticket Key", "🔎 Keyword / Sprint Search"],
@@ -58,11 +54,8 @@ mode = st.radio(
     key="stage1_mode"
 )
 
-# ══════════════════════════════════════════════════════════
-# MODE A — Direct ticket key entry
-# ══════════════════════════════════════════════════════════
+# ── MODE A — Direct ticket key ────────────────────────────
 if mode == "🔑 Direct Ticket Key":
-
     col_input, col_btn = st.columns([4, 1])
     with col_input:
         jira_key = st.text_input(
@@ -82,16 +75,15 @@ if mode == "🔑 Direct Ticket Key":
                 st.session_state["ticket"]   = ticket
                 st.session_state["context"]  = ctx
                 st.session_state["jira_key"] = jira_key
-                for k in ["test_cases","plan","yaml","job_id","execution",
-                          "exec_status","exec_logs","health_checks","verification"]:
+                for k in ["test_cases", "plan", "yaml", "job_id", "execution",
+                          "exec_status", "exec_logs", "health_checks", "verification",
+                          "go_no_go", "sprint_mode", "sprint_summaries"]:
                     st.session_state.pop(k, None)
                 st.success(f"✅ Loaded {jira_key}")
             except Exception as e:
                 st.error(str(e))
 
-# ══════════════════════════════════════════════════════════
-# MODE B — Keyword + Sprint search
-# ══════════════════════════════════════════════════════════
+# ── MODE B — Keyword + Sprint search ─────────────────────
 else:
     s1, s2, s3 = st.columns([2, 2, 1])
     with s1:
@@ -108,11 +100,10 @@ else:
             with st.spinner("Searching Jira and Confluence..."):
                 try:
                     result = smart_search(project=sd_project, keyword=sd_keyword, sprint=sd_sprint)
-                    st.session_state["sd_results"] = result
+                    st.session_state["sd_results"]  = result
                     st.session_state["sd_selected"] = []
                     kws = [k for k in (sd_keyword or "").split() if len(k) > 2][:5]
-                    conf_results = search_confluence(kws, max_results=3)
-                    st.session_state["sd_confluence_docs"] = conf_results
+                    st.session_state["sd_confluence_docs"] = search_confluence(kws, max_results=3)
                 except Exception as e:
                     st.error(str(e))
 
@@ -144,12 +135,12 @@ else:
                 with st.expander(f"📚 {len(conf_docs)} Confluence docs found", expanded=False):
                     for doc in conf_docs:
                         st.markdown(f"**{doc['title']}**")
-                        st.caption(doc.get("excerpt","")[:200])
+                        st.caption(doc.get("excerpt", "")[:200])
                         st.markdown(f"[Open in Confluence]({doc['url']})")
                         st.divider()
 
-            type_icon = {"Epic":"🟣","Story":"🟢","Bug":"🔴","Task":"🔵","Subtask":"⚪"}.get
-            pri_icon  = {"Critical":"🔴","High":"🟠","Medium":"🟡","Low":"🟢"}.get
+            type_icon = {"Epic": "🟣", "Story": "🟢", "Bug": "🔴", "Task": "🔵", "Subtask": "⚪"}.get
+            pri_icon  = {"Critical": "🔴", "High": "🟠", "Medium": "🟡", "Low": "🟢"}.get
 
             sa_col, sn_col, sgen_col, _ = st.columns([1, 1, 2, 3])
             if sa_col.button("Select All", key="sd_all"):
@@ -158,6 +149,7 @@ else:
             if sn_col.button("Clear", key="sd_none"):
                 st.session_state["sd_selected"] = []
                 st.rerun()
+
             if sgen_col.button("⚡ Select All & Generate", type="primary", key="sd_all_gen"):
                 st.session_state["sd_selected"] = [t["key"] for t in tickets]
                 all_keys = [t["key"] for t in tickets]
@@ -168,27 +160,24 @@ else:
                 for i, key in enumerate(all_keys):
                     status.info(f"Generating test cases for {key} ({i+1}/{len(all_keys)})...")
                     try:
-                        ctx    = build_full_ticket_context(key)
-                        res    = generate_test_cases(ctx)
+                        ctx = build_full_ticket_context(key)
+                        res = generate_test_cases(ctx)
                         st.session_state["sd_sprint_tc"][key] = {"context": ctx, "test_cases": res}
                     except Exception as e:
                         st.session_state["sd_sprint_tc"][key] = {"error": str(e)}
                     progress.progress((i + 1) / len(all_keys))
                 status.success(f"✅ Done — {len(all_keys)} tickets processed")
-
-                # Auto-load first ticket so Stage 2 unlocks
-                first_key = all_keys[0]
+                first_key  = all_keys[0]
                 first_data = st.session_state["sd_sprint_tc"].get(first_key, {})
                 if "test_cases" in first_data:
                     try:
-                        first_ticket = get_ticket(first_key)
-                        first_ctx    = build_full_ticket_context(first_key)
-                        st.session_state["ticket"]     = first_ticket
-                        st.session_state["context"]    = first_ctx
-                        st.session_state["jira_key"]   = first_key
-                        st.session_state["test_cases"] = first_data["test_cases"]
+                        st.session_state["ticket"]      = get_ticket(first_key)
+                        st.session_state["context"]     = build_full_ticket_context(first_key)
+                        st.session_state["jira_key"]    = first_key
+                        st.session_state["test_cases"]  = first_data["test_cases"]
                         st.session_state["sprint_mode"] = True
-                        for k in ["plan","yaml","job_id","execution","exec_status","exec_logs","health_checks"]:
+                        for k in ["plan", "yaml", "job_id", "execution", "exec_status",
+                                  "exec_logs", "health_checks", "go_no_go"]:
                             st.session_state.pop(k, None)
                     except Exception:
                         pass
@@ -250,27 +239,24 @@ else:
                     for i, key in enumerate(selected):
                         status.info(f"Generating test cases for {key}...")
                         try:
-                            ctx    = build_full_ticket_context(key)
-                            res    = generate_test_cases(ctx)
+                            ctx = build_full_ticket_context(key)
+                            res = generate_test_cases(ctx)
                             st.session_state["sd_sprint_tc"][key] = {"context": ctx, "test_cases": res}
                         except Exception as e:
                             st.session_state["sd_sprint_tc"][key] = {"error": str(e)}
                         progress.progress((i + 1) / len(selected))
                     status.success(f"✅ Done — {len(selected)} tickets processed")
-
-                    # Auto-load first ticket + set sprint mode so Stage 2 unlocks
-                    first_key = selected[0]
+                    first_key  = selected[0]
                     first_data = st.session_state["sd_sprint_tc"].get(first_key, {})
                     if "test_cases" in first_data:
                         try:
-                            first_ticket = get_ticket(first_key)
-                            first_ctx    = build_full_ticket_context(first_key)
-                            st.session_state["ticket"]    = first_ticket
-                            st.session_state["context"]   = first_ctx
-                            st.session_state["jira_key"]  = first_key
-                            st.session_state["test_cases"] = first_data["test_cases"]
+                            st.session_state["ticket"]      = get_ticket(first_key)
+                            st.session_state["context"]     = build_full_ticket_context(first_key)
+                            st.session_state["jira_key"]    = first_key
+                            st.session_state["test_cases"]  = first_data["test_cases"]
                             st.session_state["sprint_mode"] = True
-                            for k in ["plan","yaml","job_id","execution","exec_status","exec_logs","health_checks"]:
+                            for k in ["plan", "yaml", "job_id", "execution", "exec_status",
+                                      "exec_logs", "health_checks", "go_no_go"]:
                                 st.session_state.pop(k, None)
                         except Exception:
                             pass
@@ -280,13 +266,12 @@ else:
                     if st.button(f"▶️ Load {selected[0]} into Full Pipeline", key="sd_load_pipeline_btn"):
                         key = selected[0]
                         try:
-                            ticket = get_ticket(key)
-                            ctx    = build_full_ticket_context(key)
-                            st.session_state["ticket"]   = ticket
-                            st.session_state["context"]  = ctx
+                            st.session_state["ticket"]   = get_ticket(key)
+                            st.session_state["context"]  = build_full_ticket_context(key)
                             st.session_state["jira_key"] = key
-                            for k in ["test_cases","plan","yaml","job_id","execution",
-                                      "exec_status","exec_logs","health_checks","verification"]:
+                            for k in ["test_cases", "plan", "yaml", "job_id", "execution",
+                                      "exec_status", "exec_logs", "health_checks", "verification",
+                                      "go_no_go", "sprint_mode", "sprint_summaries"]:
                                 st.session_state.pop(k, None)
                             st.success(f"✅ {key} loaded — scroll down to Stage 2")
                         except Exception as e:
@@ -295,9 +280,8 @@ else:
 _came_from_discovery = (
     "ticket" in st.session_state and
     "sd_sprint_tc" in st.session_state and
-    st.session_state.get("jira_key","") in st.session_state.get("sd_sprint_tc", {})
+    st.session_state.get("jira_key", "") in st.session_state.get("sd_sprint_tc", {})
 )
-
 
 st.divider()
 
@@ -312,18 +296,15 @@ if "ticket" not in st.session_state:
     st.warning("⬆️ Complete Stage 1 first")
 
 elif st.session_state.get("sprint_mode") and "test_cases" in st.session_state:
-    # ── Sprint mode — show all tickets combined ────────────
-    sd_sprint_tc  = st.session_state.get("sd_sprint_tc", {})
-    sprint_keys   = st.session_state.get("sd_sprint_tc_keys", st.session_state.get("sprint_keys", []))
+    sd_sprint_tc = st.session_state.get("sd_sprint_tc", {})
+    sprint_keys  = st.session_state.get("sd_sprint_tc_keys", [])
 
-    # Build per-ticket summaries
     sprint_summaries = []
-    total_all = 0
-    total_func = total_neg = total_edge = total_intg = total_regr = total_p1 = 0
+    total_all = total_func = total_neg = total_edge = total_intg = total_regr = total_p1 = 0
     for k in sprint_keys:
-        data = sd_sprint_tc.get(k, {})
-        ctx  = data.get("context", {})
-        tc   = data.get("test_cases", {})
+        data  = sd_sprint_tc.get(k, {})
+        ctx   = data.get("context", {})
+        tc    = data.get("test_cases", {})
         cov_k = tc.get("coverage_summary", {})
         cases_k = cov_k.get("total_cases", 0)
         total_all  += cases_k
@@ -332,7 +313,7 @@ elif st.session_state.get("sprint_mode") and "test_cases" in st.session_state:
         total_edge += cov_k.get("edge_cases", 0)
         total_intg += cov_k.get("integration", 0)
         total_regr += cov_k.get("regression", 0)
-        total_p1   += sum(1 for t in tc.get("test_suite",[]) if t.get("priority")=="P1")
+        total_p1   += sum(1 for t in tc.get("test_suite", []) if t.get("priority") == "P1")
         sprint_summaries.append({
             "key":        k,
             "summary":    ctx.get("summary", k),
@@ -342,143 +323,125 @@ elif st.session_state.get("sprint_mode") and "test_cases" in st.session_state:
         })
     st.session_state["sprint_summaries"] = sprint_summaries
 
-    # Use aggregated coverage
-    combined_tc = st.session_state.get("test_cases", {})
-    cov = {
-        "total_cases": total_all,
-        "functional":  total_func,
-        "negative":    total_neg,
-        "edge_cases":  total_edge,
-        "integration": total_intg,
-        "regression":  total_regr,
-    }
-
     st.success(f"🚀 Sprint Pipeline — {len(sprint_keys)} tickets · {total_all} total test cases")
 
-    # Sprint tickets overview
-    risk_icon = {"Low":"🟢","Medium":"🟡","High":"🟠","Critical":"🔴"}
-    type_icon = {"Epic":"🟣","Story":"🟢","Bug":"🔴","Task":"🔵"}
+    risk_icon = {"Low": "🟢", "Medium": "🟡", "High": "🟠", "Critical": "🔴"}
+    type_icon = {"Epic": "🟣", "Story": "🟢", "Bug": "🔴", "Task": "🔵"}
     for s in sprint_summaries:
-        ri = risk_icon.get(s["risk"],"🟡")
-        ti = type_icon.get(s["issue_type"],"🔵")
-        st.write(f"{ti}  · {s['summary'][:60]} · {ri} {s['risk']} · {s['cases']} cases")
+        st.write(f"{type_icon.get(s['issue_type'],'🔵')}  · {s['summary'][:60]} · {risk_icon.get(s['risk'],'🟡')} {s['risk']} · {s['cases']} cases")
 
     st.divider()
-    m1,m2,m3,m4,m5,m6 = st.columns(6)
-    m1.metric("Total Cases",  cov.get("total_cases",  0))
-    m2.metric("Functional",   cov.get("functional",   0))
-    m3.metric("Negative",     cov.get("negative",     0))
-    m4.metric("Edge Cases",   cov.get("edge_cases",   0))
-    m5.metric("Integration",  cov.get("integration",  0))
-    m6.metric("Regression",   cov.get("regression",   0))
+    m1, m2, m3, m4, m5, m6 = st.columns(6)
+    m1.metric("Total Cases",  total_all)
+    m2.metric("Functional",   total_func)
+    m3.metric("Negative",     total_neg)
+    m4.metric("Edge Cases",   total_edge)
+    m5.metric("Integration",  total_intg)
+    m6.metric("Regression",   total_regr)
 
     if total_p1:
         st.info(f"🔴 {total_p1} P1 cases across sprint → feed into Stage 4 AI Recommendation")
 
-    if combined_tc.get("qa_notes"):
-        st.warning(f"📝 **Sprint QA Notes:** {combined_tc['qa_notes'][:400]}")
-
     st.caption("Scroll down to Stage 3 to generate the combined sprint runbook.")
 
 elif _came_from_discovery and "test_cases" in st.session_state:
-    st.success(f"✅ Test cases already generated from Sprint Discovery — {st.session_state['test_cases']['coverage_summary'].get('total_cases',0)} cases ready")
+    st.success(f"✅ Test cases already generated from Sprint Discovery — {st.session_state['test_cases']['coverage_summary'].get('total_cases', 0)} cases ready")
     st.caption("Scroll down to Stage 3 to build the runbook.")
     if st.button("🔄 Regenerate test cases", key="regen_tc_btn"):
         st.session_state.pop("test_cases", None)
         st.rerun()
+
 else:
     if st.button("🧪 Generate Test Cases", type="primary", key="gen_tc_btn"):
         with st.spinner("Analysing ticket context and generating test cases..."):
             try:
                 result = generate_test_cases(st.session_state["context"])
                 st.session_state["test_cases"] = result
-                for k in ["plan","yaml","job_id","execution",
-                          "exec_status","exec_logs","health_checks","verification"]:
+                for k in ["plan", "yaml", "job_id", "execution", "exec_status",
+                          "exec_logs", "health_checks", "verification", "go_no_go"]:
                     st.session_state.pop(k, None)
                 st.success(f"✅ {result['coverage_summary']['total_cases']} test cases generated")
             except Exception as e:
                 st.error(str(e))
 
-# In sprint mode, build combined test suite from all tickets
+# Build combined suite in sprint mode
 if st.session_state.get("sprint_mode"):
     sd_sprint_tc = st.session_state.get("sd_sprint_tc", {})
     sprint_keys  = st.session_state.get("sd_sprint_tc_keys", [])
     combined_suite = []
     for k in sprint_keys:
-        data = sd_sprint_tc.get(k, {})
-        tc_k = data.get("test_cases", {})
-        for t in tc_k.get("test_suite", []):
+        for t in sd_sprint_tc.get(k, {}).get("test_cases", {}).get("test_suite", []):
             t_copy = dict(t)
             t_copy["ticket_key"] = k
             combined_suite.append(t_copy)
     if combined_suite:
         st.session_state["test_cases"] = {
-            "test_suite": combined_suite,
+            "test_suite":       combined_suite,
             "coverage_summary": {"total_cases": len(combined_suite)},
-            "risk_level": "High",
-            "qa_notes": ""
+            "risk_level":       "High",
+            "qa_notes":         ""
         }
 
 if "test_cases" in st.session_state:
-    tc  = st.session_state["test_cases"]
-    cov = tc.get("coverage_summary", {})
+    tc   = st.session_state["test_cases"]
+    cov  = tc.get("coverage_summary", {})
     risk = tc.get("risk_level", "Medium")
-    risk_icon = {"Low":"🟢","Medium":"🟡","High":"🟠","Critical":"🔴"}.get(risk,"🟡")
+    risk_icon = {"Low": "🟢", "Medium": "🟡", "High": "🟠", "Critical": "🔴"}.get(risk, "🟡")
 
-    m1,m2,m3,m4,m5,m6,m7 = st.columns(7)
+    m1, m2, m3, m4, m5, m6, m7 = st.columns(7)
     m1.metric("Risk",        f"{risk_icon} {risk}")
-    m2.metric("Total",       cov.get("total_cases", 0))
-    m3.metric("Functional",  cov.get("functional",  0))
-    m4.metric("Negative",    cov.get("negative",    0))
-    m5.metric("Edge Cases",  cov.get("edge_cases",  0))
-    m6.metric("Integration", cov.get("integration", 0))
-    m7.metric("Regression",  cov.get("regression",  0))
+    m2.metric("Total",       cov.get("total_cases",  0))
+    m3.metric("Functional",  cov.get("functional",   0))
+    m4.metric("Negative",    cov.get("negative",     0))
+    m5.metric("Edge Cases",  cov.get("edge_cases",   0))
+    m6.metric("Integration", cov.get("integration",  0))
+    m7.metric("Regression",  cov.get("regression",   0))
 
     if tc.get("qa_notes"):
         st.warning(f"📝 **QA Notes:** {tc['qa_notes']}")
 
-    p1_cases = [t for t in tc.get("test_suite",[]) if t.get("priority")=="P1"]
+    p1_cases = [t for t in tc.get("test_suite", []) if t.get("priority") == "P1"]
     if p1_cases:
         st.info(f"🔴 **{len(p1_cases)} P1 test cases → feed into Stage 4 AI Recommendation**")
 
     cat_icon = {
-        "Functional":"⚙️","Edge Case":"⚠️","Negative":"❌",
-        "Integration":"🔗","Regression":"🔄","Reproduction":"🐛"
+        "Functional": "⚙️", "Edge Case": "⚠️", "Negative": "❌",
+        "Integration": "🔗", "Regression": "🔄", "Reproduction": "🐛"
     }
-    pri_icon = {"P1":"🔴","P2":"🟡","P3":"🟢"}
+    pri_icon = {"P1": "🔴", "P2": "🟡", "P3": "🟢"}
 
-    f1,f2 = st.columns(2)
+    f1, f2 = st.columns(2)
     with f1:
-        all_cats = sorted(set(t.get("category","") for t in tc.get("test_suite",[])))
+        all_cats = sorted(set(t.get("category", "") for t in tc.get("test_suite", [])))
         sel_cats = st.multiselect("Filter Category", all_cats, default=all_cats, key="s2_cat")
     with f2:
-        all_pris = sorted(set(t.get("priority","") for t in tc.get("test_suite",[])))
+        all_pris = sorted(set(t.get("priority", "") for t in tc.get("test_suite", [])))
         sel_pris = st.multiselect("Filter Priority", all_pris, default=all_pris, key="s2_pri")
 
     filtered = [
-        t for t in tc.get("test_suite",[])
+        t for t in tc.get("test_suite", [])
         if t.get("category") in sel_cats and t.get("priority") in sel_pris
     ]
 
     for test in filtered:
-        cat = test.get("category","Functional")
-        pri = test.get("priority","P2")
+        cat   = test.get("category", "Functional")
+        pri   = test.get("priority", "P2")
         label = f"{pri_icon.get(pri,'🟡')} {test.get('id','')} · {cat_icon.get(cat,'⚙️')} {cat} · {test.get('title','')}"
         with st.expander(label, expanded=False):
-            left, right = st.columns([3,1])
+            left, right = st.columns([3, 1])
             with left:
                 if test.get("preconditions"):
                     st.markdown("**Preconditions**")
                     st.write(test["preconditions"])
                 st.markdown("**Steps**")
-                for step in test.get("steps",[]):
+                for step in test.get("steps", []):
                     st.write(f"• {step}")
                 st.markdown("**Expected Result**")
-                st.success(test.get("expected_result",""))
+                st.success(test.get("expected_result", ""))
             with right:
                 st.write(f"{pri_icon.get(pri,'🟡')} {pri}")
                 st.write(f"{cat_icon.get(cat,'⚙️')} {cat}")
-                for tag in test.get("tags",[]):
+                for tag in test.get("tags", []):
                     st.markdown(f"`{tag}`")
 
 st.divider()
@@ -497,7 +460,7 @@ else:
 
     p1_criteria = [
         t["expected_result"]
-        for t in st.session_state["test_cases"].get("test_suite",[])
+        for t in st.session_state["test_cases"].get("test_suite", [])
         if t.get("priority") == "P1"
     ]
 
@@ -506,8 +469,8 @@ else:
         st.info(f"Sprint Pipeline active: {len(sprint_summaries)} tickets combined")
         with st.expander("Tickets in this sprint deployment", expanded=True):
             for s in sprint_summaries:
-                ti = {"Epic":"Epic","Story":"Story","Bug":"Bug","Task":"Task"}.get(s["issue_type"],"")
-                st.write(f"-  {s["summary"][:70]} ({ti}) - {s["cases"]} test cases")
+                ti = {"Epic": "Epic", "Story": "Story", "Bug": "Bug", "Task": "Task"}.get(s["issue_type"], "")
+                st.write(f"-  {s['summary'][:70]} ({ti}) - {s['cases']} test cases")
 
     if p1_criteria:
         with st.expander(f"{len(p1_criteria)} P1 success criteria feeding into runbook", expanded=False):
@@ -516,29 +479,17 @@ else:
 
     if st.session_state.get("sprint_mode"):
         sprint_summaries = st.session_state.get("sprint_summaries", [])
-        tickets_text = ", ".join([s["key"] for s in sprint_summaries])
-        base_brief = f"Sprint deployment: {tickets_text}"
+        base_brief = f"Sprint deployment: {', '.join([s['key'] for s in sprint_summaries])}"
     else:
         base_brief = build_execution_brief(ticket)
 
+    if p1_criteria:
+        base_brief += "\n\n" + "\n".join(["Success Criteria:"] + ["- " + c for c in p1_criteria])
 
-    if p1_criteria: base_brief += chr(10)+chr(10)+(chr(10).join(["Success Criteria:"]+["- "+c for c in p1_criteria]))
-
-
-
-
-
-    edited_brief = st.text_area(
-        "Execution Intent",
-        value=base_brief,
-        height=150,
-        key="brief_input"
-    )
-    extra_notes = st.text_area(
-        "Additional Instructions (optional)",
-        placeholder="e.g. include rollback, validate artifact checksum...",
-        key="extra_notes"
-    )
+    edited_brief = st.text_area("Execution Intent", value=base_brief, height=150, key="brief_input")
+    extra_notes  = st.text_area("Additional Instructions (optional)",
+                                placeholder="e.g. include rollback, validate artifact checksum...",
+                                key="extra_notes")
 
     final_prompt = edited_brief.strip()
     if extra_notes:
@@ -547,23 +498,23 @@ else:
     if st.button("Generate Runbook", type="primary", key="gen_runbook_btn"):
         with st.spinner("Detecting ticket groups and searching Confluence..."):
             try:
-                # Step 1 — detect ticket groups
                 ticket_groups = []
                 if st.session_state.get("sprint_mode"):
                     sprint_summaries = st.session_state.get("sprint_summaries", [])
-                    contexts = [st.session_state.get("sd_sprint_tc",{}).get(s["key"],{}).get("context",{}) for s in sprint_summaries]
+                    contexts = [
+                        st.session_state.get("sd_sprint_tc", {}).get(s["key"], {}).get("context", {})
+                        for s in sprint_summaries
+                    ]
                     contexts = [c for c in contexts if c]
                     if len(contexts) >= 2:
                         ticket_groups = detect_ticket_groups(contexts)
                         st.session_state["ticket_groups"] = ticket_groups
 
-                # Step 2 — search Confluence
-                keywords = final_prompt.split()[:6]
-                conf_docs = search_confluence(keywords, max_results=4)
+                keywords    = final_prompt.split()[:6]
+                conf_docs   = search_confluence(keywords, max_results=4)
                 conf_context = format_confluence_context(conf_docs)
                 st.session_state["confluence_docs"] = conf_docs
 
-                # Step 3 — generate runbook
                 plan = analyze_ticket(
                     ticket,
                     final_prompt,
@@ -571,16 +522,20 @@ else:
                     ticket_groups=ticket_groups if ticket_groups else None
                 )
                 st.session_state["plan"] = plan
-                for k in ["yaml","job_id","execution","exec_status","exec_logs","health_checks","verification"]:
+                for k in ["yaml", "job_id", "execution", "exec_status", "exec_logs",
+                          "health_checks", "verification", "go_no_go"]:
                     st.session_state.pop(k, None)
-                st.success(f"Runbook generated" + (f" — {len(ticket_groups)} ticket groups detected" if ticket_groups else "") + (f" — {len(conf_docs)} Confluence docs used" if conf_docs else ""))
+                st.success(
+                    "Runbook generated"
+                    + (f" — {len(ticket_groups)} ticket groups detected" if ticket_groups else "")
+                    + (f" — {len(conf_docs)} Confluence docs used" if conf_docs else "")
+                )
             except Exception as e:
                 st.error(str(e))
 
 if "plan" in st.session_state:
     plan = st.session_state["plan"]
 
-    # Styled runbook cards matching his UI pattern
     card_css = """
     <style>
     .rb-card{border-radius:16px;padding:1.2rem 1.4rem;background:rgba(255,252,246,0.9);
@@ -601,7 +556,7 @@ if "plan" in st.session_state:
         import html
         if is_list and isinstance(content, list):
             items = "".join(f"<li>{html.escape(str(c))}</li>" for c in content)
-            body = f"<ol class='rb-list'>{items}</ol>"
+            body  = f"<ol class='rb-list'>{items}</ol>"
         else:
             body = f"<p>{html.escape(str(content))}</p>"
         st.markdown(
@@ -613,21 +568,18 @@ if "plan" in st.session_state:
 
     rb_card("Summary",        plan.get("summary", ""))
     rb_card("Probable Cause", plan.get("probable_cause", ""))
-    rb_card("Pre-checks",     plan.get("pre_checks", []),  is_list=True)
+    rb_card("Pre-checks",     plan.get("pre_checks", []), is_list=True)
 
-    # Resolution steps — one code block per step
     if plan.get("steps"):
         import html
         steps_items = ""
         for idx, step in enumerate(plan["steps"], 1):
-            cmds = chr(10).join(step.get("commands", []))
-            cmds_escaped = html.escape(cmds)
-            cmds_escaped = html.escape(cmds)
+            cmds = "\n".join(step.get("commands", []))
             steps_items += (
                 f'<div style="margin-bottom:1rem">'
                 f'<p><strong>{idx}. {html.escape(step.get("description",""))}</strong></p>'
                 f'<pre style="background:#1e1e2e;color:#cdd6f4;padding:1rem;border-radius:8px;'
-                f'font-size:0.85rem;overflow-x:auto">{cmds_escaped}</pre></div>'
+                f'font-size:0.85rem;overflow-x:auto">{html.escape(cmds)}</pre></div>'
             )
         st.markdown(
             f'<div class="rb-card"><div class="rb-eyebrow">Runbook Section</div>'
@@ -635,39 +587,38 @@ if "plan" in st.session_state:
             f'<div class="rb-body">{steps_items}</div></div>',
             unsafe_allow_html=True
         )
-    # ── Groups integrated into runbook between steps and validation ──
+
     groups = plan.get("groups", [])
     if groups:
         import html as _html
-        type_bg = {"deployment":"D9E1F2","bugfix":"FDECEA","feature":"E8F5E9","migration":"FFF3E0","testing":"EDE7F6"}
-        type_hdr = {"deployment":"1F4E78","bugfix":"C0392B","feature":"1A6B3A","migration":"B7860B","testing":"4A235A"}
+        type_bg  = {"deployment": "D9E1F2", "bugfix": "FDECEA", "feature": "E8F5E9", "migration": "FFF3E0", "testing": "EDE7F6"}
+        type_hdr = {"deployment": "1F4E78", "bugfix": "C0392B", "feature": "1A6B3A", "migration": "B7860B", "testing": "4A235A"}
         for grp in groups:
-            gtype    = grp.get("type","deployment")
-            gtickets = ", ".join(grp.get("tickets",[]))
-            gname    = grp.get("name","")
-            bg  = type_bg.get(gtype, "D9E1F2")
-            hdr = type_hdr.get(gtype, "1F4E78")
-            # Group header card with reason
-            greason = grp.get("reason", "")
+            gtype    = grp.get("type", "deployment")
+            gtickets = ", ".join(grp.get("tickets", []))
+            gname    = grp.get("name", "")
+            bg       = type_bg.get(gtype, "D9E1F2")
+            hdr      = type_hdr.get(gtype, "1F4E78")
+            greason  = grp.get("reason", "")
             st.markdown(
                 f'<div style="border-left:4px solid #{hdr};background:#{bg};padding:0.8rem 1rem;'
                 f'border-radius:8px;margin:1rem 0 0.5rem 0">'
                 f'<span style="font-size:0.72rem;text-transform:uppercase;letter-spacing:0.1em;color:#{hdr};font-weight:700">GROUP · {gtype.upper()}</span>'
                 f'<br><strong style="font-size:1.05rem">{_html.escape(gname)}</strong>'
                 f'<span style="color:#666;font-size:0.85rem"> — {_html.escape(gtickets)}</span>'
-                + (f'<br><span style="font-size:0.8rem;color:#555;font-style:italic">Why grouped: {_html.escape(greason)}</span>' if greason else '')
-                + '</div>',
+                + (f'<br><span style="font-size:0.8rem;color:#555;font-style:italic">Why grouped: {_html.escape(greason)}</span>' if greason else "")
+                + "</div>",
                 unsafe_allow_html=True
             )
             col_l, col_r = st.columns(2)
             with col_l:
                 if grp.get("pre_checks"):
                     st.markdown("**Pre-checks**")
-                    for i,c in enumerate(grp["pre_checks"],1):
+                    for i, c in enumerate(grp["pre_checks"], 1):
                         st.write(f"{i}. {c}")
                 if grp.get("validation"):
                     st.markdown("**Validation**")
-                    for i,v in enumerate(grp["validation"],1):
+                    for i, v in enumerate(grp["validation"], 1):
                         st.write(f"{i}. {v}")
             with col_r:
                 if grp.get("rollback"):
@@ -675,8 +626,8 @@ if "plan" in st.session_state:
                     st.error(grp["rollback"])
             if grp.get("steps"):
                 st.markdown("**Steps**")
-                for idx, step in enumerate(grp["steps"],1):
-                    cmds = chr(10).join(step.get("commands",[]))
+                for idx, step in enumerate(grp["steps"], 1):
+                    cmds = "\n".join(step.get("commands", []))
                     st.markdown(f"*{idx}. {_html.escape(step.get('description',''))}*")
                     st.code(cmds, language="bash")
             st.markdown("---")
@@ -685,15 +636,12 @@ if "plan" in st.session_state:
     rb_card("Escalation", plan.get("escalation", ""))
     rb_card("Rollback",   plan.get("rollback",   ""))
 
-    # ── Confluence docs used ───────────────────────────────
     conf_docs = st.session_state.get("confluence_docs", [])
     if conf_docs:
         with st.expander(f"📚 {len(conf_docs)} Confluence docs used as context", expanded=False):
             for doc in conf_docs:
                 st.markdown(f"**[{doc['title']}]({doc['url']})**")
-                st.caption(doc.get("excerpt","")[:200])
-
-
+                st.caption(doc.get("excerpt", "")[:200])
 
 st.divider()
 
@@ -705,17 +653,12 @@ if "plan" in st.session_state:
         with st.spinner("Building Excel file..."):
             try:
                 from services.runbook_export import export_runbook_excel
-                ticket          = st.session_state["ticket"]
-                test_cases      = st.session_state.get("test_cases")
-                plan            = st.session_state["plan"]
-                health_checks   = st.session_state.get("health_checks")
-                sprint_summaries= st.session_state.get("sprint_summaries")
                 xlsx_bytes = export_runbook_excel(
-                    ticket=ticket,
-                    test_cases=test_cases,
-                    plan=plan,
-                    health_checks=health_checks,
-                    sprint_summaries=sprint_summaries,
+                    ticket=st.session_state["ticket"],
+                    test_cases=st.session_state.get("test_cases"),
+                    plan=st.session_state["plan"],
+                    health_checks=st.session_state.get("health_checks"),
+                    sprint_summaries=st.session_state.get("sprint_summaries"),
                 )
                 st.session_state["xlsx_bytes"] = xlsx_bytes
                 st.success("Excel file ready")
@@ -724,7 +667,7 @@ if "plan" in st.session_state:
 
     if "xlsx_bytes" in st.session_state:
         jira_key = st.session_state.get("jira_key", "runbook")
-        filename = f"runbook_{jira_key}_{__import__("datetime").datetime.now().strftime('%Y%m%d_%H%M')}.xlsx"
+        filename = f"runbook_{jira_key}_{datetime.now().strftime('%Y%m%d_%H%M')}.xlsx"
         st.download_button(
             label="Download Excel",
             data=st.session_state["xlsx_bytes"],
@@ -734,6 +677,7 @@ if "plan" in st.session_state:
         )
 
 st.divider()
+
 
 # ══════════════════════════════════════════════════════════
 # STAGE 4 — AI RECOMMENDATION
@@ -746,7 +690,6 @@ if "test_cases" not in st.session_state:
 elif "plan" not in st.session_state:
     st.warning("Complete Stage 3 first")
 else:
-    # Simulated runtime metrics — fixed values as per demo
     RUNTIME_METRICS = {
         "pods_ready_percent": 100,
         "error_rate_percent": 1.8,
@@ -755,17 +698,6 @@ else:
     }
 
     if "go_no_go" not in st.session_state:
-        # Show the metrics being used
-        st.markdown("#### Runtime Health Metrics")
-        r1, r2, r3, r4 = st.columns(4)
-        r1.metric("Pods Ready %",    f"{RUNTIME_METRICS['pods_ready_percent']}%",
-                  delta="Healthy", delta_color="normal")
-        r2.metric("Error Rate %",    f"{RUNTIME_METRICS['error_rate_percent']}%",
-                  delta="Warning", delta_color="inverse")
-        r3.metric("Latency P95",     f"{RUNTIME_METRICS['latency_p95_ms']}ms",
-                  delta="OK", delta_color="normal")
-        r4.metric("Decision Required", "Yes", delta="Review needed", delta_color="inverse")
-
         if st.button("Get AI Recommendation", type="primary", key="gen_gng_btn"):
             with st.spinner("AI analysing runtime metrics..."):
                 try:
@@ -776,8 +708,8 @@ else:
                         sprint_summaries=st.session_state.get("sprint_summaries"),
                         runtime_metrics=RUNTIME_METRICS
                     )
-                    st.session_state["go_no_go"] = result
-                    st.session_state["runtime_metrics_used"] = RUNTIME_METRICS
+                    st.session_state["go_no_go"]              = result
+                    st.session_state["runtime_metrics_used"]  = RUNTIME_METRICS
                 except Exception as e:
                     st.error(str(e))
 
@@ -788,16 +720,13 @@ else:
         summary    = gng.get("summary", "")
         rm         = st.session_state.get("runtime_metrics_used", RUNTIME_METRICS)
 
-        # ── Runtime metrics display ─────────────────────────
+        # ── Runtime Health Metrics ──────────────────────────
         st.markdown("#### Runtime Health Metrics")
         r1, r2, r3, r4 = st.columns(4)
-        r1.metric("Pods Ready %",    f"{rm['pods_ready_percent']}%",
-                  delta="Healthy", delta_color="normal")
-        r2.metric("Error Rate %",    f"{rm['error_rate_percent']}%",
-                  delta="Warning",  delta_color="inverse")
-        r3.metric("Latency P95",     f"{rm['latency_p95_ms']}ms",
-                  delta="OK",       delta_color="normal")
-        r4.metric("Decision Required", "Yes", delta="Review needed", delta_color="inverse")
+        r1.metric("Pods Ready %",      f"{rm['pods_ready_percent']}%",  delta="Healthy",       delta_color="normal")
+        r2.metric("Error Rate %",      f"{rm['error_rate_percent']}%",  delta="Warning",       delta_color="inverse")
+        r3.metric("Latency P95",       f"{rm['latency_p95_ms']}ms",     delta="OK",            delta_color="normal")
+        r4.metric("Decision Required", "Yes",                           delta="Review needed", delta_color="inverse")
 
         st.markdown("---")
 
@@ -812,14 +741,12 @@ else:
         st.caption(f"AI Confidence: {int(confidence * 100)}%")
         st.progress(confidence)
 
-        # ── Recommendation reasons ──────────────────────────
         reasons = gng.get("reasons", [])
         if reasons:
             st.markdown("#### Why this recommendation")
             for r in reasons:
                 st.write(f"• {r}")
 
-        # ── Conditions (PAUSE/ROLLBACK only) ───────────────
         conditions = gng.get("conditions", [])
         if conditions and verdict != "GO":
             st.markdown("#### Must resolve before proceeding")
@@ -828,9 +755,7 @@ else:
 
         st.divider()
 
-        
-
-        # ── Notify Teams ──────────────────────────────────
+        # ── Notify Teams ────────────────────────────────────
         st.markdown("### 📣 Notify Team on Microsoft Teams")
 
         teams_webhook_url = os.getenv("TEAMS_WEBHOOK_URL", "")
@@ -840,11 +765,8 @@ else:
         else:
             if st.button("📨 Send to Teams", type="primary", key="send_teams_btn"):
                 try:
-                    import requests as _req
-                    from datetime import datetime
-
-                    ticket_s = st.session_state["ticket"]
-                    jira_key = st.session_state.get("jira_key", ticket_s.get("key", ""))
+                    ticket_s      = st.session_state["ticket"]
+                    jira_key      = st.session_state.get("jira_key", ticket_s.get("key", ""))
                     verdict_emoji = {"GO": "✅", "PAUSE": "⏸️", "ROLLBACK": "🔴"}.get(verdict, "⏸️")
 
                     pa_payload = {
@@ -854,12 +776,14 @@ else:
                         "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M"),
                     }
 
-                    resp = _req.post(teams_webhook_url, json=pa_payload, timeout=10)
+                    resp = requests.post(teams_webhook_url, json=pa_payload, timeout=10)
                     if resp.status_code in (200, 202):
                         st.success("✅ Sent to Teams")
                     else:
                         st.error(f"Failed: {resp.status_code}")
-
                 except Exception as e:
                     st.error(str(e))
+
+        st.divider()
+        st.markdown("### Pipeline Complete")
         render_progress()
