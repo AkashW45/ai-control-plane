@@ -9,10 +9,10 @@ from services.test_case_generator import generate_test_cases
 from services.confluence_search import search_confluence, format_confluence_context
 
 
-st.set_page_config(layout="wide", page_title="AI-Genrated runbook")
+st.set_page_config(layout="wide", page_title="AI Generated Runbook")
 
-st.title("AI-Genrated runbook")
-st.caption("Jira-Driven DevOps Orchestration · Powered by Groq")
+st.title("AI Generated Runbook")
+st.caption("Jira-Driven DevOps Automation · Powered by Groq")
 
 
 # ─────────────────────────────────────────────────────────
@@ -23,7 +23,7 @@ def render_progress():
         ("1 · Jira",       "ticket"      in st.session_state),
         ("2 · Test Cases", "test_cases"  in st.session_state),
         ("3 · Runbook",    "plan"        in st.session_state),
-        ("4 · Health Checks", "health_checks" in st.session_state),
+        ("4 · AI Rec",        "go_no_go"           in st.session_state),
     ]
     cols = st.columns(len(stages))
     for col, (label, done) in zip(cols, stages):
@@ -302,7 +302,7 @@ st.divider()
 # STAGE 2 — GENERATE TEST CASES
 # ══════════════════════════════════════════════════════════
 st.markdown("## Stage 2 · Generate Test Cases")
-st.caption("AI defines what success looks like BEFORE execution — P1/P2 cases become Stage 4 health checks")
+st.caption("AI defines what success looks like BEFORE execution — P1/P2 cases feed into Stage 4 AI Recommendation")
 
 if "ticket" not in st.session_state:
     st.warning("⬆️ Complete Stage 1 first")
@@ -369,7 +369,7 @@ elif st.session_state.get("sprint_mode") and "test_cases" in st.session_state:
     m6.metric("Regression",   cov.get("regression",   0))
 
     if total_p1:
-        st.info(f"🔴 {total_p1} P1 cases across sprint → auto-generate health checks in Stage 4")
+        st.info(f"🔴 {total_p1} P1 cases across sprint → feed into Stage 4 AI Recommendation")
 
     if combined_tc.get("qa_notes"):
         st.warning(f"📝 **Sprint QA Notes:** {combined_tc['qa_notes'][:400]}")
@@ -435,7 +435,7 @@ if "test_cases" in st.session_state:
 
     p1_cases = [t for t in tc.get("test_suite",[]) if t.get("priority")=="P1"]
     if p1_cases:
-        st.info(f"🔴 **{len(p1_cases)} P1 test cases will auto-generate health checks in Stage 4**")
+        st.info(f"🔴 **{len(p1_cases)} P1 test cases → feed into Stage 4 AI Recommendation**")
 
     cat_icon = {
         "Functional":"⚙️","Edge Case":"⚠️","Negative":"❌",
@@ -696,7 +696,7 @@ st.divider()
 # ── Excel Export ──────────────────────────────────────────
 if "plan" in st.session_state:
     st.markdown("### 📥 Export Runbook")
-    st.caption("Download complete runbook as Excel — Summary, Test Cases, Runbook, Health Checks")
+    st.caption("Download complete runbook as Excel — Summary, Test Cases, Runbook, AI Recommendations")
     if st.button("Generate Excel Export", type="primary", key="export_xlsx_btn"):
         with st.spinner("Building Excel file..."):
             try:
@@ -732,59 +732,167 @@ if "plan" in st.session_state:
 st.divider()
 
 # ══════════════════════════════════════════════════════════
-# STAGE 4 — HEALTH CHECKS
+# STAGE 4 — AI RECOMMENDATION
 # ══════════════════════════════════════════════════════════
-st.markdown("## Stage 4 · Health Checks")
-st.caption("AI-generated verification scripts derived from P1/P2 test cases")
+st.markdown("## Stage 4 · AI Recommendation")
+st.caption("AI analyses runtime health metrics and gives a deployment recommendation")
 
 if "test_cases" not in st.session_state:
     st.warning("Complete Stage 2 first")
 elif "plan" not in st.session_state:
-    st.warning("Complete Stage 3 first — generate the runbook before health checks")
+    st.warning("Complete Stage 3 first")
 else:
-    tc     = st.session_state["test_cases"]
-    ticket = st.session_state["ticket"]
+    # Simulated runtime metrics — fixed values as per demo
+    RUNTIME_METRICS = {
+        "pods_ready_percent": 100,
+        "error_rate_percent": 1.8,
+        "latency_p95_ms":     420,
+        "decision_required":  True
+    }
 
-    # Show which test cases become health checks
-    p1_cases = [t for t in tc.get("test_suite",[]) if t.get("priority") in ["P1","P2"]]
-    st.info(f"**{len(p1_cases)} P1/P2 test cases** will generate health check scripts")
+    if "go_no_go" not in st.session_state:
+        # Show the metrics being used
+        st.markdown("#### Runtime Health Metrics")
+        r1, r2, r3, r4 = st.columns(4)
+        r1.metric("Pods Ready %",    f"{RUNTIME_METRICS['pods_ready_percent']}%",
+                  delta="Healthy", delta_color="normal")
+        r2.metric("Error Rate %",    f"{RUNTIME_METRICS['error_rate_percent']}%",
+                  delta="Warning", delta_color="inverse")
+        r3.metric("Latency P95",     f"{RUNTIME_METRICS['latency_p95_ms']}ms",
+                  delta="OK", delta_color="normal")
+        r4.metric("Decision Required", "Yes", delta="Review needed", delta_color="inverse")
 
-    if "health_checks" not in st.session_state:
-        if st.button("Generate Health Checks", type="primary", key="gen_hc_btn"):
-            with st.spinner("Converting P1/P2 test cases into verification scripts..."):
+        if st.button("Get AI Recommendation", type="primary", key="gen_gng_btn"):
+            with st.spinner("AI analysing runtime metrics..."):
                 try:
-                    from services.health_check import generate_health_checks
-                    hc = generate_health_checks(tc, ticket)
-                    st.session_state["health_checks"] = hc
-                    st.success(f"{len(hc.get('health_checks', []))} health checks generated")
+                    from services.llm import generate_go_no_go
+                    result = generate_go_no_go(
+                        plan=st.session_state["plan"],
+                        test_cases=st.session_state["test_cases"],
+                        sprint_summaries=st.session_state.get("sprint_summaries"),
+                        runtime_metrics=RUNTIME_METRICS
+                    )
+                    st.session_state["go_no_go"] = result
+                    st.session_state["runtime_metrics_used"] = RUNTIME_METRICS
                 except Exception as e:
                     st.error(str(e))
 
-    if "health_checks" in st.session_state:
-        hc = st.session_state["health_checks"]
-        checks = hc.get("health_checks", [])
+    if "go_no_go" in st.session_state:
+        gng        = st.session_state["go_no_go"]
+        verdict    = gng.get("verdict", "PAUSE")
+        confidence = float(gng.get("confidence", 0))
+        summary    = gng.get("summary", "")
+        rm         = st.session_state.get("runtime_metrics_used", RUNTIME_METRICS)
 
-        st.markdown(f"### {len(checks)} Verification Scripts")
-        st.caption("Each script maps back to the test case that defined it")
+        # ── Runtime metrics display ─────────────────────────
+        st.markdown("#### Runtime Health Metrics")
+        r1, r2, r3, r4 = st.columns(4)
+        r1.metric("Pods Ready %",    f"{rm['pods_ready_percent']}%",
+                  delta="Healthy", delta_color="normal")
+        r2.metric("Error Rate %",    f"{rm['error_rate_percent']}%",
+                  delta="Warning",  delta_color="inverse")
+        r3.metric("Latency P95",     f"{rm['latency_p95_ms']}ms",
+                  delta="OK",       delta_color="normal")
+        r4.metric("Decision Required", "Yes", delta="Review needed", delta_color="inverse")
 
-        for check in checks:
-            with st.expander(
-                f"{check['id']} · {check['title']} ← ",
-                expanded=False
-            ):
-                left, right = st.columns([3, 1])
-                with left:
-                    st.markdown("**Verification Command**")
-                    st.code(check["command"], language="bash")
-                    st.markdown("**Expected Output**")
-                    st.success(check["expected_output"])
-                with right:
-                    st.markdown("**On Failure**")
-                    st.error(check["on_failure"])
+        st.markdown("---")
 
-        if hc.get("rundeck_script"):
-            with st.expander("Full Combined Verification Script", expanded=False):
-                st.code(hc["rundeck_script"], language="bash")
+        # ── Verdict Banner ──────────────────────────────────
+        if verdict == "GO":
+            st.success(f"## ✅  GO — {summary}")
+        elif verdict == "PAUSE":
+            st.warning(f"## ⏸️  PAUSE — {summary}")
+        else:
+            st.error(f"## 🔴  ROLLBACK — {summary}")
+
+        st.caption(f"AI Confidence: {int(confidence * 100)}%")
+        st.progress(confidence)
+
+        # ── Recommendation reasons ──────────────────────────
+        reasons = gng.get("reasons", [])
+        if reasons:
+            st.markdown("#### Why this recommendation")
+            for r in reasons:
+                st.write(f"• {r}")
+
+        # ── Conditions (PAUSE/ROLLBACK only) ───────────────
+        conditions = gng.get("conditions", [])
+        if conditions and verdict != "GO":
+            st.markdown("#### Must resolve before proceeding")
+            for c in conditions:
+                st.error(f"• {c}")
+
+        st.divider()
+
+        # ── Notify Teams ────────────────────────────────────
+        st.markdown("### 📣 Notify Team on Microsoft Teams")
+        st.caption("Send release summary with AI recommendation to your Teams channel")
+
+        webhook_url = st.text_input(
+            "Teams Webhook URL",
+            placeholder="https://yourorg.webhook.office.com/...",
+            key="teams_webhook"
+        )
+
+        if st.button("Send to Microsoft Teams", type="primary", key="send_teams_btn"):
+            if not webhook_url:
+                st.error("Please enter a Teams webhook URL")
+            else:
+                try:
+                    import requests as _req
+                    from datetime import datetime
+
+                    plan_s    = st.session_state["plan"]
+                    ticket_s  = st.session_state["ticket"]
+                    sp_sum    = st.session_state.get("sprint_summaries", [])
+                    tickets_str = ", ".join([s["key"] for s in sp_sum]) if sp_sum else ticket_s.get("key","")
+
+                    verdict_emoji = {"GO": "✅", "PAUSE": "⏸️", "ROLLBACK": "🔴"}.get(verdict, "⏸️")
+                    verdict_color = {"GO": "Good",  "PAUSE": "Warning", "ROLLBACK": "Attention"}.get(verdict, "Warning")
+
+                    reasons_text = "\n".join([f"• {r}" for r in reasons]) if reasons else "—"
+                    conditions_text = "\n".join([f"• {c}" for c in conditions]) if conditions else "None"
+
+                    teams_payload = {
+                        "@type": "MessageCard",
+                        "@context": "http://schema.org/extensions",
+                        "themeColor": {"GO": "00B050", "PAUSE": "FFC000", "ROLLBACK": "FF0000"}.get(verdict, "FFC000"),
+                        "summary": f"AI Recommendation: {verdict} — {ticket_s.get('project','')} Release",
+                        "sections": [
+                            {
+                                "activityTitle": f"{verdict_emoji} AI Recommendation: **{verdict}**",
+                                "activitySubtitle": f"{ticket_s.get('project','')} · {datetime.now().strftime('%Y-%m-%d %H:%M')}",
+                                "activityText": summary,
+                                "facts": [
+                                    {"name": "Tickets",        "value": tickets_str},
+                                    {"name": "Fix Version",    "value": ticket_s.get("fixVersion","")},
+                                    {"name": "Priority",       "value": ticket_s.get("priority","")},
+                                    {"name": "Pods Ready",     "value": f"{rm['pods_ready_percent']}%"},
+                                    {"name": "Error Rate",     "value": f"{rm['error_rate_percent']}%"},
+                                    {"name": "Latency P95",    "value": f"{rm['latency_p95_ms']}ms"},
+                                    {"name": "AI Confidence",  "value": f"{int(confidence*100)}%"},
+                                ],
+                                "markdown": True
+                            },
+                            {
+                                "title": "Recommendation Reasons",
+                                "text": reasons_text
+                            },
+                            {
+                                "title": "Conditions to Resolve" if conditions and verdict != "GO" else "Next Steps",
+                                "text": conditions_text if conditions and verdict != "GO" else "Proceed with deployment as per runbook sequence."
+                            }
+                        ]
+                    }
+
+                    resp = _req.post(webhook_url, json=teams_payload, timeout=10)
+                    if resp.status_code == 200:
+                        st.success("✅ Message sent to Microsoft Teams successfully")
+                    else:
+                        st.error(f"Teams returned {resp.status_code}: {resp.text}")
+
+                except Exception as e:
+                    st.error(f"Failed to send: {str(e)}")
 
         st.divider()
         st.markdown("### Pipeline Complete")

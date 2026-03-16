@@ -162,3 +162,104 @@ DEPLOYMENT CONTEXT:
         content = content.split("```")[1]
         if content.startswith("json"): content = content[4:]
     return json.loads(content.strip())
+
+
+
+
+
+def generate_go_no_go(plan: dict, test_cases: dict, sprint_summaries: list = None, runtime_metrics: dict = None) -> dict:
+    groups     = plan.get("groups", [])
+    all_tests  = test_cases.get("test_suite", [])
+    p1_cases   = [t for t in all_tests if t.get("priority") == "P1"]
+    p2_cases   = [t for t in all_tests if t.get("priority") == "P2"]
+    qa_notes   = test_cases.get("qa_notes", "")
+    risk_level = test_cases.get("risk_level", "Medium")
+    total      = len(all_tests)
+    p1_count   = len(p1_cases)
+    p2_count   = len(p2_cases)
+    neg_count  = len([t for t in all_tests if t.get("category") == "Negative"])
+    has_migration = any(g.get("type") == "migration" for g in groups)
+    has_bugfix    = any(g.get("type") == "bugfix"    for g in groups)
+
+    groups_lines = []
+    for g in groups:
+        groups_lines.append("  - " + g["name"] + " (" + g["type"] + ") tickets: " + ", ".join(g.get("tickets",[])))
+        groups_lines.append("    Rollback: " + g.get("rollback","NOT DEFINED"))
+    groups_text = chr(10).join(groups_lines)
+
+    p1_lines = []
+    for t in p1_cases:
+        p1_lines.append("  [" + t["id"] + "] " + t["title"] + " -> MUST PASS: " + t["expected_result"])
+    p1_text = chr(10).join(p1_lines)
+
+    sprint_text = ""
+    if sprint_summaries:
+        sprint_text = "Sprint: " + ", ".join([s["key"] + " (" + s.get("issue_type","Task") + ")" for s in sprint_summaries])
+
+    prompt = (
+        "You are a senior release manager making a Go/No-Go deployment decision.\n\n"
+        "Return ONLY valid JSON. No markdown.\n\n"
+        "{\n"
+        '  "verdict": "GO or PAUSE or ROLLBACK",\n'
+        '  "confidence": 0.0,\n'
+        '  "summary": "one sentence verdict explanation",\n'
+        '  "metrics_evaluated": {\n'
+        '    "total_test_cases": ' + str(total) + ',\n'
+        '    "p1_cases": ' + str(p1_count) + ',\n'
+        '    "p2_cases": ' + str(p2_count) + ',\n'
+        '    "negative_cases": ' + str(neg_count) + ',\n'
+        '    "risk_level": "' + risk_level + '",\n'
+        '    "groups_count": ' + str(len(groups)) + ',\n'
+        '    "has_migration_group": ' + str(has_migration).lower() + ',\n'
+        '    "has_bugfix_group": ' + str(has_bugfix).lower() + ',\n'
+        '    "pods_ready_percent": "evaluate: 100% expected for GO",\n'
+        '    "error_rate_percent": "evaluate: <1% for GO, 1-3% for PAUSE, >3% ROLLBACK",\n'
+        '    "latency_p95_ms": "evaluate: <500ms for GO, 500-800ms for PAUSE, >800ms ROLLBACK"\n'
+        "  },\n"
+        '  "release_constraints_checked": ["Constraint: PASS or FAIL"],\n'
+        '  "reasons": ["specific reason referencing actual ticket or group"],\n'
+        '  "risks": ["specific risk identified"],\n'
+        '  "conditions": ["what must be resolved before proceeding — empty array if GO"],\n'
+        '  "deployment_sequence": ["recommended execution order for groups"]\n'
+        "}\n\n"
+        "VERDICT RULES:\n"
+        "- GO: P1 cases well-defined, rollback exists for every group, no critical blockers\n"
+        "- PAUSE: Vague P1 results, missing rollback, unresolved QA dependencies\n"
+        "- ROLLBACK: No P1 cases, no rollback defined, migration has no backup\n\n"
+        "RELEASE CONSTRAINTS TO CHECK:\n"
+        "1. Every group must have a defined rollback procedure\n"
+        "2. Migration groups must run before deployment groups\n"
+        "3. P1 cases must have specific measurable expected results\n"
+        "4. QA notes must not have unresolved blocking dependencies\n"
+        "5. High or Critical risk requires at least 5 P1 cases\n\n"
+        "METRICS:\n"
+        "  Test Coverage: total=" + str(total) + " p1=" + str(p1_count) +
+        " p2=" + str(p2_count) + " negative=" + str(neg_count) + " risk=" + risk_level + "\n"
+        "  Ticket Groups: count=" + str(len(groups)) + " migration=" + str(has_migration) +
+        " bugfix=" + str(has_bugfix) + "\n"
+        "  Runtime Health Metrics:\n"
+        "    pods_ready_percent=" + str((runtime_metrics or {}).get("pods_ready_percent", "not provided")) +
+        " (threshold: 100% = GO, <100% = PAUSE)\n"
+        "    error_rate_percent=" + str((runtime_metrics or {}).get("error_rate_percent", "not provided")) +
+        " (threshold: <1% = GO, 1-3% = PAUSE, >3% = ROLLBACK)\n"
+        "    latency_p95_ms=" + str((runtime_metrics or {}).get("latency_p95_ms", "not provided")) +
+        " (threshold: <500ms = GO, 500-800ms = PAUSE, >800ms = ROLLBACK)\n\n"
+        "RUNBOOK SUMMARY: " + plan.get("summary","") + "\n"
+        "ESCALATION: " + plan.get("escalation","") + "\n\n"
+        "GROUPS WITH ROLLBACKS:\n" + groups_text + "\n\n"
+        + sprint_text + "\n\n"
+        "P1 TEST CASES:\n" + p1_text + "\n\n"
+        "QA NOTES:\n" + qa_notes
+    )
+
+    r = requests.post(BASE_URL,
+        headers={"Authorization": f"Bearer {API_KEY}", "Content-Type": "application/json"},
+        json={"model": MODEL, "messages": [{"role": "user", "content": prompt}], "temperature": 0.1},
+        timeout=60)
+    r.raise_for_status()
+
+    txt = r.json()["choices"][0]["message"]["content"].strip()
+    if txt.startswith("```"):
+        txt = txt.split("```")[1]
+        if txt.startswith("json"): txt = txt[4:]
+    return json.loads(txt.strip())
