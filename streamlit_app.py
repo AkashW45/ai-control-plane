@@ -9,9 +9,9 @@ from services.test_case_generator import generate_test_cases
 from services.confluence_search import search_confluence, format_confluence_context
 
 
-st.set_page_config(layout="wide", page_title="AI Control Plane")
+st.set_page_config(layout="wide", page_title="AI-Genrated runbook")
 
-st.title("AI Control Plane")
+st.title("AI-Genrated runbook")
 st.caption("Jira-Driven DevOps Orchestration · Powered by Groq")
 
 
