@@ -2,6 +2,7 @@ import streamlit as st
 import os
 from datetime import datetime
 import requests
+
 from services.jira import get_ticket
 from services.jira_context import build_full_ticket_context
 from services.jira_search import smart_search
@@ -167,20 +168,32 @@ else:
                         st.session_state["sd_sprint_tc"][key] = {"error": str(e)}
                     progress.progress((i + 1) / len(all_keys))
                 status.success(f"✅ Done — {len(all_keys)} tickets processed")
-                first_key  = all_keys[0]
-                first_data = st.session_state["sd_sprint_tc"].get(first_key, {})
-                if "test_cases" in first_data:
-                    try:
-                        st.session_state["ticket"]      = get_ticket(first_key)
-                        st.session_state["context"]     = build_full_ticket_context(first_key)
+
+                # Auto-load first successful ticket — use already-fetched context
+                # Avoids second API call and silent failure that caused the stuck state
+                for first_key in all_keys:
+                    first_data = st.session_state["sd_sprint_tc"].get(first_key, {})
+                    first_ctx  = first_data.get("context", {})
+                    if first_data.get("test_cases") and first_ctx:
+                        first_ticket = {
+                            "key":        first_ctx.get("key",        first_key),
+                            "summary":    first_ctx.get("summary",    ""),
+                            "description":first_ctx.get("description",""),
+                            "priority":   first_ctx.get("priority",   "Medium"),
+                            "status":     first_ctx.get("status",     ""),
+                            "issuetype":  first_ctx.get("issue_type", "Task"),
+                            "project":    first_ctx.get("project",    ""),
+                            "fixVersion": (first_ctx.get("fix_versions") or ["auto"])[0],
+                        }
+                        st.session_state["ticket"]      = first_ticket
+                        st.session_state["context"]     = first_ctx
                         st.session_state["jira_key"]    = first_key
                         st.session_state["test_cases"]  = first_data["test_cases"]
                         st.session_state["sprint_mode"] = True
                         for k in ["plan", "yaml", "job_id", "execution", "exec_status",
                                   "exec_logs", "health_checks", "go_no_go"]:
                             st.session_state.pop(k, None)
-                    except Exception:
-                        pass
+                        break
                 st.rerun()
 
             def render_ticket_row(ticket, badge=""):
@@ -246,20 +259,31 @@ else:
                             st.session_state["sd_sprint_tc"][key] = {"error": str(e)}
                         progress.progress((i + 1) / len(selected))
                     status.success(f"✅ Done — {len(selected)} tickets processed")
-                    first_key  = selected[0]
-                    first_data = st.session_state["sd_sprint_tc"].get(first_key, {})
-                    if "test_cases" in first_data:
-                        try:
-                            st.session_state["ticket"]      = get_ticket(first_key)
-                            st.session_state["context"]     = build_full_ticket_context(first_key)
+
+                    # Auto-load first successful ticket — use already-fetched context
+                    for first_key in selected:
+                        first_data = st.session_state["sd_sprint_tc"].get(first_key, {})
+                        first_ctx  = first_data.get("context", {})
+                        if first_data.get("test_cases") and first_ctx:
+                            first_ticket = {
+                                "key":        first_ctx.get("key",        first_key),
+                                "summary":    first_ctx.get("summary",    ""),
+                                "description":first_ctx.get("description",""),
+                                "priority":   first_ctx.get("priority",   "Medium"),
+                                "status":     first_ctx.get("status",     ""),
+                                "issuetype":  first_ctx.get("issue_type", "Task"),
+                                "project":    first_ctx.get("project",    ""),
+                                "fixVersion": (first_ctx.get("fix_versions") or ["auto"])[0],
+                            }
+                            st.session_state["ticket"]      = first_ticket
+                            st.session_state["context"]     = first_ctx
                             st.session_state["jira_key"]    = first_key
                             st.session_state["test_cases"]  = first_data["test_cases"]
                             st.session_state["sprint_mode"] = True
                             for k in ["plan", "yaml", "job_id", "execution", "exec_status",
                                       "exec_logs", "health_checks", "go_no_go"]:
                                 st.session_state.pop(k, None)
-                        except Exception:
-                            pass
+                            break
 
             with btn_col2:
                 if len(selected) == 1:
@@ -790,13 +814,23 @@ else:
         # STAGE 5 — DEPLOY TO RUNDECK
         # ══════════════════════════════════════════════════════
         st.markdown("## Stage 5 · Deploy to Rundeck")
-        st.caption("Imports the full runbook as a Rundeck job and executes it — requires your approval")
 
         ticket_s = st.session_state["ticket"]
         plan_s   = st.session_state["plan"]
+        groups   = plan_s.get("groups", [])
+        has_groups = len(groups) > 0
 
-        # ── Step 1: Environment + version + approval ──────────
-        if "rundeck_execution_id" not in st.session_state:
+        if has_groups:
+            st.caption(
+                f"**{len(groups)} ticket groups detected** — each group gets its own Rundeck job "
+                f"executed in order: migration → bugfix → testing → feature → deployment. "
+                f"If any group fails the chain stops."
+            )
+        else:
+            st.caption("Single deployment — all steps in one Rundeck job.")
+
+        # ── Step 1: Config + preview + approval ───────────────
+        if "rundeck_group_results" not in st.session_state:
 
             col_env, col_ver = st.columns(2)
             with col_env:
@@ -808,106 +842,223 @@ else:
                     key="run_ver"
                 )
 
-            # Show what will be deployed
-            with st.expander("📋 What will be sent to Rundeck", expanded=False):
-                st.write(f"**Job name:** `{ticket_s.get('key', '')}`")
-                st.write(f"**Summary:** {ticket_s.get('summary', '')}")
-                st.write(f"**Steps:** {len(plan_s.get('steps', []))}")
-                for i, step in enumerate(plan_s.get("steps", []), 1):
-                    st.write(f"  {i}. {step.get('description', '')}")
-                    for cmd in step.get("commands", []):
-                        resolved = cmd.replace("{{ environment }}", run_env).replace("{{ version }}", run_ver)
-                        resolved = resolved.replace("{environment}", run_env).replace("{version}", run_ver)
-                        st.code(resolved, language="bash")
+            # Preview — show groups or flat steps
+            if has_groups:
+                from services.rundeck import GROUP_ORDER
+                ordered = sorted(groups, key=lambda g: GROUP_ORDER.get(g.get("type","deployment"), 99))
+                st.markdown("#### Execution Order")
+                type_icon = {
+                    "migration":  "🗄️", "bugfix": "🐛",
+                    "feature":    "✨", "deployment": "🚀", "testing": "🧪"
+                }
+                for i, grp in enumerate(ordered, 1):
+                    gtype   = grp.get("type", "deployment")
+                    gname   = grp.get("name", gtype)
+                    tickets = ", ".join(grp.get("tickets", []))
+                    icon    = type_icon.get(gtype, "📦")
+                    with st.expander(
+                        f"{i}. {icon} {gname} `{gtype}` — Tickets: {tickets}",
+                        expanded=False
+                    ):
+                        if grp.get("pre_checks"):
+                            st.markdown("**Pre-checks:**")
+                            for c in grp["pre_checks"]:
+                                st.write(f"- {c}")
+                        if grp.get("steps"):
+                            st.markdown("**Steps:**")
+                            for step in grp["steps"]:
+                                st.write(f"**{step.get('description','')}**")
+                                for cmd in step.get("commands", []):
+                                    r = cmd.replace("{{ environment }}", run_env)\
+                                           .replace("{{ version }}", run_ver)\
+                                           .replace("{environment}", run_env)\
+                                           .replace("{version}", run_ver)
+                                    st.code(r, language="bash")
+                        if grp.get("validation"):
+                            st.markdown("**Validation:**")
+                            for v in grp["validation"]:
+                                st.write(f"- {v}")
+                        if grp.get("rollback"):
+                            st.error(f"**Rollback:** {grp['rollback']}")
+            else:
+                with st.expander("📋 What will be sent to Rundeck", expanded=False):
+                    for i, step in enumerate(plan_s.get("steps", []), 1):
+                        st.write(f"**{i}. {step.get('description','')}**")
+                        for cmd in step.get("commands", []):
+                            r = cmd.replace("{{ environment }}", run_env)\
+                                   .replace("{{ version }}", run_ver)\
+                                   .replace("{environment}", run_env)\
+                                   .replace("{version}", run_ver)
+                            st.code(r, language="bash")
 
-            st.markdown("**Confirm you have reviewed the runbook and approve execution:**")
-            approved = st.checkbox("✅ I approve — execute this runbook in Rundeck", key="rundeck_approve")
+            st.markdown("**Confirm you have reviewed and approve execution:**")
+            approved = st.checkbox(
+                "✅ I approve — execute this runbook in Rundeck",
+                key="rundeck_approve"
+            )
 
             if approved:
-                if st.button("🚀 Import & Execute in Rundeck", type="primary", key="run_rundeck_btn"):
-                    with st.spinner("Building job, importing and executing in Rundeck..."):
+                btn_label = (
+                    f"🚀 Execute {len(groups)} Group Jobs in Rundeck"
+                    if has_groups else
+                    "🚀 Import & Execute in Rundeck"
+                )
+                if st.button(btn_label, type="primary", key="run_rundeck_btn"):
+                    with st.spinner("Running in Rundeck..."):
                         try:
                             from services.rundeck_executor import RundeckExecutor
+                            executor = RundeckExecutor()
+                            options  = {
+                                "environment": run_env,
+                                "version":     run_ver,
+                                "dry_run":     "false"
+                            }
 
-                            executor  = RundeckExecutor()
-                            execution = executor.run(
-                                ticket=ticket_s,
-                                plan=plan_s,
-                                options={
-                                    "environment": run_env,
-                                    "version":     run_ver,
-                                    "dry_run":     "false"
-                                },
-                                context={}
-                            )
-                            execution_id  = execution["id"]
-                            execution_url = executor.get_execution_url(execution_id)
-
-                            st.session_state["rundeck_execution_id"]  = execution_id
-                            st.session_state["rundeck_execution_url"] = execution_url
+                            if has_groups:
+                                results = executor.run_groups(
+                                    ticket=ticket_s,
+                                    plan=plan_s,
+                                    options=options,
+                                    context={}
+                                )
+                                st.session_state["rundeck_group_results"] = results
+                            else:
+                                execution = executor.run(
+                                    ticket=ticket_s,
+                                    plan=plan_s,
+                                    options=options,
+                                    context={}
+                                )
+                                st.session_state["rundeck_group_results"] = [{
+                                    "group_name":    ticket_s.get("key", ""),
+                                    "group_type":    "deployment",
+                                    "tickets":       [ticket_s.get("key", "")],
+                                    "job_id":        None,
+                                    "execution_id":  execution["id"],
+                                    "execution_url": executor.get_execution_url(execution["id"]),
+                                    "status":        "SUCCEEDED",
+                                    "logs":          []
+                                }]
                             st.rerun()
                         except Exception as e:
                             st.error(str(e))
 
-        # ── Step 2: Execution link + status polling ───────────
-        if "rundeck_execution_id" in st.session_state:
-            execution_id  = st.session_state["rundeck_execution_id"]
-            execution_url = st.session_state.get("rundeck_execution_url", "")
+        # ── Step 2: Results per group ─────────────────────────
+        if "rundeck_group_results" in st.session_state:
+            results = st.session_state["rundeck_group_results"]
 
-            st.success(f"✅ Execution triggered — ID: `{execution_id}`")
-            st.markdown(f"### 🔗 [View Live Execution in Rundeck]({execution_url})")
+            status_icon = {
+                "SUCCEEDED":  "✅", "FAILED":  "❌",
+                "SKIPPED":    "⏭️", "ERROR":   "💥",
+                "RUNNING":    "⏳", "UNKNOWN": "❓"
+            }
+            type_icon = {
+                "migration":  "🗄️", "bugfix":     "🐛",
+                "feature":    "✨", "deployment": "🚀",
+                "testing":    "🧪", "validation": "🔍"
+            }
 
-            if "rundeck_final_status" not in st.session_state:
-                if st.button("🔄 Check Execution Status", key="poll_rundeck_btn"):
-                    with st.spinner("Polling Rundeck for completion..."):
-                        try:
-                            import time
-                            from services.rundeck import get_execution_state
-                            from services.rundeck import get_execution_output
+            # Separate deployment groups from validation result
+            group_results      = [r for r in results if r["group_type"] != "validation"]
+            validation_results = [r for r in results if r["group_type"] == "validation"]
 
-                            final = None
-                            for _ in range(20):
-                                state = get_execution_state(execution_id)
-                                if state.get("completed"):
-                                    final = state.get("executionState", "unknown")
-                                    break
-                                time.sleep(4)
+            all_groups_ok   = all(r["status"] == "SUCCEEDED" for r in group_results)
+            any_failed      = any(r["status"] in ("FAILED", "ERROR") for r in group_results)
+            validation_done = len(validation_results) > 0
+            validation_ok   = validation_done and validation_results[0]["status"] == "SUCCEEDED"
 
-                            if final:
-                                logs = get_execution_output(execution_id)
-                                st.session_state["rundeck_final_status"] = final
-                                st.session_state["rundeck_logs"]         = logs
-                                st.rerun()
-                            else:
-                                st.info("Still running — click again to re-check")
-                        except Exception as e:
-                            st.error(str(e))
+            # ── Overall banner ────────────────────────────────
+            if all_groups_ok and validation_ok:
+                st.success("## ✅ All groups deployed + post-deployment validation passed")
+            elif all_groups_ok and validation_done and not validation_ok:
+                st.warning("## ⚠️ Deployment succeeded but post-deployment validation failed")
+            elif any_failed:
+                st.error("## ❌ One or more groups failed — chain stopped")
+            elif all_groups_ok and not validation_done:
+                st.success("## ✅ All groups executed successfully")
+            else:
+                st.warning("## ⚠️ Execution complete with skipped groups")
 
-            if "rundeck_final_status" in st.session_state:
-                final = st.session_state["rundeck_final_status"]
-                logs  = st.session_state.get("rundeck_logs", {})
-
-                if final == "SUCCEEDED":
-                    st.success("## ✅ Execution SUCCEEDED")
-                elif final == "FAILED":
-                    st.error("## ❌ Execution FAILED")
-                else:
-                    st.warning(f"## ⚠️ Status: {final}")
-
-                st.markdown(f"**[Open full execution in Rundeck →]({execution_url})**")
-
-                # Clean logs — only actual step output, no system noise
-                log_entries = logs.get("entries", [])
-                clean_lines = [
-                    e.get("log", "").rstrip()
-                    for e in log_entries
-                    if e.get("log", "").strip()
-                    and e.get("type") == "log"
-                    and e.get("stepctx")
-                ]
-                if clean_lines:
-                    with st.expander("📋 Execution Logs", expanded=True):
+            # ── Group results ─────────────────────────────────
+            st.markdown("#### Group Execution Results")
+            for r in group_results:
+                si    = status_icon.get(r["status"], "❓")
+                ti    = type_icon.get(r["group_type"], "📦")
+                label = (
+                    f"{si} {ti} **{r['group_name']}** `{r['group_type']}` "
+                    f"— Tickets: {', '.join(r['tickets'])} — **{r['status']}**"
+                )
+                with st.expander(label, expanded=(r["status"] in ("FAILED", "ERROR"))):
+                    if r.get("execution_url"):
+                        st.markdown(f"🔗 [View execution in Rundeck]({r['execution_url']})")
+                    if r.get("error"):
+                        st.error(f"Error: {r['error']}")
+                    if r["status"] == "SKIPPED":
+                        st.info("Skipped — previous group failed")
+                    clean_lines = [
+                        e.get("log", "").rstrip()
+                        for e in r.get("logs", [])
+                        if e.get("log", "").strip()
+                    ]
+                    if clean_lines:
                         st.code("\n".join(clean_lines), language="bash")
+
+            # ── Post-deployment validation result ─────────────
+            if validation_results:
+                vr = validation_results[0]
+                st.markdown("#### 🔍 Post-Deployment Validation")
+                si = status_icon.get(vr["status"], "❓")
+                with st.expander(
+                    f"{si} **{vr['group_name']}** — **{vr['status']}**",
+                    expanded=True
+                ):
+                    if vr.get("execution_url"):
+                        st.markdown(f"🔗 [View validation execution in Rundeck]({vr['execution_url']})")
+                    if vr.get("error"):
+                        st.error(f"Error: {vr['error']}")
+                    clean_lines = [
+                        e.get("log", "").rstrip()
+                        for e in vr.get("logs", [])
+                        if e.get("log", "").strip()
+                    ]
+                    if clean_lines:
+                        st.code("\n".join(clean_lines), language="bash")
+
+            # ── Teams summary notification ────────────────────
+            st.divider()
+            st.markdown("#### 📣 Send Deployment Summary to Teams")
+            teams_webhook_url = os.getenv("TEAMS_WEBHOOK_URL", "")
+            if not teams_webhook_url:
+                st.caption("⚠️ TEAMS_WEBHOOK_URL not set in .env")
+            else:
+                if st.button("📨 Send Full Summary to Teams", key="teams_summary_btn"):
+                    try:
+                        overall = (
+                            "✅ SUCCEEDED" if (all_groups_ok and (not validation_done or validation_ok))
+                            else "❌ FAILED"
+                        )
+                        summary_lines = [
+                            f"{r['group_name']} ({r['group_type']}): {r['status']}"
+                            for r in results
+                        ]
+                        payload = {
+                            "change_id":   ticket_s.get("key", ""),
+                            "project":     ticket_s.get("project", ""),
+                            "status":      overall,
+                            "summary":     " | ".join(summary_lines),
+                            "timestamp":   datetime.now().strftime("%Y-%m-%d %H:%M"),
+                        }
+                        resp = requests.post(teams_webhook_url, json=payload, timeout=10)
+                        if resp.status_code in (200, 202):
+                            st.success("✅ Summary sent to Teams")
+                        else:
+                            st.error(f"Failed: {resp.status_code}")
+                    except Exception as e:
+                        st.error(str(e))
+
+            if st.button("🔄 Reset & Run Again", key="rundeck_reset_btn"):
+                st.session_state.pop("rundeck_group_results", None)
+                st.rerun()
 
         st.divider()
         st.markdown("### Pipeline Complete")
