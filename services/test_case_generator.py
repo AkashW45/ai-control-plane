@@ -284,7 +284,7 @@ def generate_test_cases(jira_context: dict) -> dict:
         json={
             "model":    MODEL,
             "messages": [{"role": "user", "content": prompt}],
-            "temperature": 0.2
+            "temperature": 0.1
         },
         timeout=120
     )
