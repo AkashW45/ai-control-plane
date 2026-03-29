@@ -1,11 +1,7 @@
-# services/test_case_generator.py
-#
-# Generates structured functional test cases from full Jira context.
-# Uses whatever the developer wrote — no assumptions, no fabrication.
-# Test case quality scales naturally with ticket quality.
-
 import os
 import json
+import time
+import re
 import requests
 from dotenv import load_dotenv
 
@@ -17,15 +13,11 @@ MODEL    = os.getenv("GROQ_MODEL")
 
 
 # ─────────────────────────────────────────────────────────
-# Context → Structured Prompt Block
-# Every field that has content gets included.
-# Empty fields are silently skipped — no noise.
+# Build context block — everything from Jira, nothing added
 # ─────────────────────────────────────────────────────────
-
 def format_context_for_prompt(ctx: dict) -> str:
     lines = []
 
-    # ── Ticket identity ───────────────────────────────────
     lines.append(f"TICKET:    {ctx['key']}")
     lines.append(f"TYPE:      {ctx['issue_type']}")
     lines.append(f"PRIORITY:  {ctx['priority']}")
@@ -34,200 +26,259 @@ def format_context_for_prompt(ctx: dict) -> str:
 
     if ctx.get("assignee") and ctx["assignee"] != "Unassigned":
         lines.append(f"ASSIGNEE:  {ctx['assignee']}")
-    if ctx.get("reporter"):
-        lines.append(f"REPORTER:  {ctx['reporter']}")
-    if ctx.get("team"):
-        lines.append(f"TEAM:      {ctx['team']}")
-    if ctx.get("story_points"):
-        lines.append(f"STORY POINTS: {ctx['story_points']}")
     if ctx.get("flagged"):
-        lines.append("⚠️  FLAGGED: This ticket is flagged — treat as elevated risk")
-
-    # ── Versioning ────────────────────────────────────────
+        lines.append("FLAGGED: This ticket is flagged — treat as elevated risk")
     if ctx.get("fix_versions"):
-        lines.append(f"FIX VERSION:     {', '.join(ctx['fix_versions'])}")
-    if ctx.get("affects_versions"):
-        lines.append(f"AFFECTS VERSION: {', '.join(ctx['affects_versions'])}")
-
-    # ── Classification ────────────────────────────────────
+        lines.append(f"FIX VERSION: {', '.join(ctx['fix_versions'])}")
     if ctx.get("labels"):
-        lines.append(f"LABELS:     {', '.join(ctx['labels'])}")
+        lines.append(f"LABELS: {', '.join(ctx['labels'])}")
     if ctx.get("components"):
         lines.append(f"COMPONENTS: {', '.join(ctx['components'])}")
-
-    # ── Environment (critical for bug reports) ────────────
     if ctx.get("environment"):
-        lines.append(f"\nENVIRONMENT (OS/Browser/Version):\n{ctx['environment']}")
+        lines.append(f"\nENVIRONMENT:\n{ctx['environment']}")
 
-    # ── Summary ───────────────────────────────────────────
     lines.append(f"\nSUMMARY:\n{ctx['summary']}")
 
-    # ── Description — primary context source ─────────────
-    # Contains whatever developer wrote:
-    # user story, acceptance criteria, reproduction steps,
-    # technical notes, figma links, API contracts, etc.
     if ctx.get("description"):
         lines.append(f"\nDESCRIPTION:\n{ctx['description']}")
 
-    # ── Goals ─────────────────────────────────────────────
-    if ctx.get("goals"):
-        lines.append("\nGOALS:")
-        for g in ctx["goals"]:
-            lines.append(f"  - {g}")
-
-    # ── Sprint context ────────────────────────────────────
     sprint = ctx.get("sprint", {})
     if sprint.get("name"):
-        lines.append(f"\nSPRINT:  {sprint['name']}  [{sprint.get('state', '').upper()}]")
+        lines.append(f"\nSPRINT: {sprint['name']} [{sprint.get('state','').upper()}]")
         if sprint.get("goal"):
             lines.append(f"SPRINT GOAL: {sprint['goal']}")
-        if sprint.get("end_date"):
-            lines.append(f"SPRINT END:  {sprint['end_date']}")
 
-    # ── Parent ────────────────────────────────────────────
     parent = ctx.get("parent", {})
     if parent.get("summary"):
-        lines.append(
-            f"\nPARENT {parent.get('type','').upper()}: "
-            f"[{parent['key']}] {parent['summary']} ({parent.get('status', '')})"
-        )
+        lines.append(f"\nPARENT: [{parent['key']}] {parent['summary']} ({parent.get('status','')})")
 
-    # ── Linked tickets ────────────────────────────────────
     linked = ctx.get("linked_tickets", [])
     if linked:
         lines.append("\nLINKED TICKETS:")
         for lt in linked:
-            lines.append(
-                f"  [{lt['key']}] {lt['summary']} "
-                f"— {lt['type']} | {lt['status']} | {lt['link_type']}"
-            )
+            lines.append(f"  [{lt['key']}] {lt['summary']} — {lt['link_type']} | {lt['status']}")
 
-    # ── Subtasks ──────────────────────────────────────────
     subtasks = ctx.get("subtasks", [])
     if subtasks:
         lines.append("\nSUBTASKS:")
         for s in subtasks:
             lines.append(f"  [{s['key']}] {s['summary']} ({s['status']})")
 
-    # ── Attachments — signal only, not content ────────────
-    attachments = ctx.get("attachments", [])
-    if attachments:
-        lines.append("\nATTACHMENTS (evidence provided by developer):")
-        for a in attachments:
-            lines.append(f"  - {a['filename']} ({a['mimeType']}, {a['size']} bytes) by {a['author']}")
-
-    # ── Comments — full team discussion ───────────────────
     comments = ctx.get("comments", [])
     if comments:
         lines.append("\nTEAM DISCUSSION:")
-        for c in comments:
-            # Include full comment body — developer may have added AC in comments
-            lines.append(f"\n  [{c['author']}] ({c['date'][:10]}):")
-            lines.append(f"  {c['body']}")
+        for c in comments[:5]:
+            lines.append(f"  [{c['author']}] {c['date'][:10]}: {c['body'][:400]}")
 
-    # ── Changelog — what changed and when ─────────────────
+    attachments = ctx.get("attachments", [])
+    if attachments:
+        lines.append("\nATTACHMENTS:")
+        for a in attachments:
+            lines.append(f"  - {a['filename']} by {a['author']}")
+
     changes = ctx.get("changelog", [])
     if changes:
-        lines.append("\nCHANGE HISTORY:")
-        for ch in changes[:6]:
-            lines.append(
-                f"  {ch['author']} changed [{ch['field']}]: "
-                f"{ch['from'] or 'empty'} → {ch['to'] or 'empty'}"
-            )
+        lines.append("\nRECENT CHANGES:")
+        for ch in changes[:4]:
+            lines.append(f"  {ch['author']} changed [{ch['field']}]: {ch['from'] or 'empty'} → {ch['to'] or 'empty'}")
 
     return "\n".join(lines)
 
 
 # ─────────────────────────────────────────────────────────
-# Issue-type aware instructions
-# Bug reports need reproduction steps
-# Stories need AC coverage
-# Spikes need investigation checkpoints
+# Extract all meaningful words from context
+# Used to validate test cases aren't hallucinated
 # ─────────────────────────────────────────────────────────
+def _extract_context_vocabulary(ctx: dict) -> set:
+    """
+    Build a set of meaningful words from the Jira context.
+    Any test case content should be derivable from these words.
+    """
+    text_parts = [
+        ctx.get("summary", ""),
+        ctx.get("description", ""),
+        ctx.get("environment", ""),
+        " ".join(ctx.get("labels", [])),
+        " ".join(ctx.get("components", [])),
+        " ".join(ctx.get("fix_versions", [])),
+        ctx.get("issue_type", ""),
+        ctx.get("priority", ""),
+        ctx.get("project", ""),
+        ctx.get("key", ""),
+    ]
+
+    for c in ctx.get("comments", []):
+        text_parts.append(c.get("body", ""))
+    for lt in ctx.get("linked_tickets", []):
+        text_parts.append(lt.get("summary", ""))
+    for s in ctx.get("subtasks", []):
+        text_parts.append(s.get("summary", ""))
+
+    parent = ctx.get("parent", {})
+    text_parts.append(parent.get("summary", ""))
+
+    sprint = ctx.get("sprint", {})
+    text_parts.append(sprint.get("name", ""))
+    text_parts.append(sprint.get("goal", ""))
+
+    full_text = " ".join(text_parts).lower()
+    # Extract words of 3+ chars, ignore stopwords
+    stopwords = {
+        "the","and","for","are","was","has","had","not","but","with",
+        "from","this","that","they","have","will","been","when","what",
+        "your","also","into","its","our","can","all","any","each","more"
+    }
+    words = set(re.findall(r'\b[a-z]{3,}\b', full_text)) - stopwords
+    return words
+
+
+# ─────────────────────────────────────────────────────────
+# Validate a single test case against context
+# Returns (is_valid, reason)
+# ─────────────────────────────────────────────────────────
+def _validate_test_case(tc: dict, vocab: set, ctx: dict) -> tuple:
+
+    title    = (tc.get("title") or "").lower()
+    steps    = " ".join(tc.get("steps") or []).lower()
+    expected = (tc.get("expected_result") or "").lower()
+    combined = f"{title} {steps} {expected}"
+
+    # Rule 1 — must have all required fields
+    for field in ["id", "title", "steps", "expected_result", "category", "priority"]:
+        if not tc.get(field):
+            return False, f"Missing required field: {field}"
+
+    # Rule 2 — steps must be a list with at least 2 items
+    if not isinstance(tc.get("steps"), list) or len(tc["steps"]) < 2:
+        return False, "Steps must be a list with at least 2 items"
+
+    # Rule 3 — expected result must be specific (not generic filler)
+    generic_phrases = [
+        "it should work", "works correctly", "as expected",
+        "successfully", "no errors", "properly", "correctly"
+    ]
+    if all(phrase in expected for phrase in generic_phrases[:2]) and len(expected) < 30:
+        return False, "Expected result is too generic"
+
+    # Rule 4 — title and content must contain words from Jira context
+    # At least 2 meaningful words from context must appear in the test case
+    combined_words = set(re.findall(r'\b[a-z]{3,}\b', combined))
+    overlap = combined_words & vocab
+    if len(overlap) < 2:
+        return False, f"Test case content not traceable to Jira context (overlap: {overlap})"
+
+    # Rule 5 — priority must be valid
+    if tc.get("priority") not in ("P1", "P2", "P3"):
+        return False, f"Invalid priority: {tc.get('priority')}"
+
+    # Rule 6 — category must be valid
+    valid_cats = {"Functional","Edge Case","Negative","Integration","Regression","Reproduction"}
+    if tc.get("category") not in valid_cats:
+        return False, f"Invalid category: {tc.get('category')}"
+
+    return True, "OK"
+
+
+# ─────────────────────────────────────────────────────────
+# Validate entire test suite — strip hallucinated cases
+# ─────────────────────────────────────────────────────────
+def _validate_suite(result: dict, ctx: dict) -> dict:
+    vocab = _extract_context_vocabulary(ctx)
+    suite = result.get("test_suite", [])
+
+    valid_cases   = []
+    removed_cases = []
+
+    for tc in suite:
+        is_valid, reason = _validate_test_case(tc, vocab, ctx)
+        if is_valid:
+            valid_cases.append(tc)
+        else:
+            removed_cases.append({"id": tc.get("id","?"), "reason": reason})
+
+    if removed_cases:
+        existing_notes = result.get("qa_notes", "")
+        removed_info   = ", ".join([f"{r['id']} ({r['reason']})" for r in removed_cases])
+        result["qa_notes"] = (
+            f"{existing_notes}\n"
+            f"⚠️ {len(removed_cases)} hallucinated test case(s) removed: {removed_info}"
+        ).strip()
+
+    result["test_suite"] = valid_cases
+    return result
+
 
 def get_type_specific_rules(issue_type: str) -> str:
     issue_type = (issue_type or "").lower()
-
     if issue_type == "bug":
         return """
-ISSUE TYPE IS BUG — apply these additional rules:
-- Include test cases that reproduce the exact bug using the steps in description
-- Include a test case verifying the fix does not regress adjacent functionality
-- Include negative cases: what happens with invalid/edge inputs near the bug area
-- If environment info is provided, test cases must reference that specific environment
-- P1 must include: reproduce bug, verify fix, verify no regression
+ISSUE TYPE IS BUG — use the reproduction steps from the description:
+- TC-001 must reproduce the exact bug using the steps written in the description
+- TC-002 must verify the fix resolves the issue
+- TC-003 must be a regression test — adjacent functionality still works
+- Reference the specific environment (OS/browser) if mentioned
 """
     elif issue_type in ("story", "user story"):
         return """
-ISSUE TYPE IS USER STORY — apply these additional rules:
-- Map every acceptance criteria point to at least one test case
-- Include the happy path (user completes the intended action successfully)
-- Include at least 2 negative paths (user does something wrong or unexpected)
-- Include boundary/edge cases for any numeric or text input fields mentioned
-- Test cases should follow the "As a user I..." perspective where relevant
+ISSUE TYPE IS USER STORY — map directly to acceptance criteria in description:
+- One test case per acceptance criteria point — use the exact AC wording
+- Include the happy path as described
+- Include at least 2 negative paths based on the inputs mentioned
+- Do not invent acceptance criteria not in the description
 """
     elif issue_type == "epic":
         return """
-ISSUE TYPE IS EPIC — apply these additional rules:
-- Generate high-level integration test cases covering the epic scope
-- Focus on cross-functional flows described in the epic description
-- Include test cases for each major capability mentioned
-- Include end-to-end scenario test cases
-"""
-    elif issue_type in ("spike", "research"):
-        return """
-ISSUE TYPE IS SPIKE — apply these additional rules:
-- Generate investigation checkpoints as test cases
-- Each test case should verify a specific assumption being investigated
-- Include a test case confirming the spike outcome is documented
+ISSUE TYPE IS EPIC — cover the scope described:
+- Generate integration test cases covering capabilities mentioned in description
+- Reference only the features and flows explicitly listed
 """
     else:
         return """
-ISSUE TYPE IS TASK — apply these additional rules:
-- Focus on functional verification of the deliverable
-- Include at least one test case per stated requirement or dependency
-- Include integration test if external systems are mentioned
+ISSUE TYPE IS TASK — verify only what is described:
+- Test the specific deliverable described in summary and description
+- Include integration test only if external systems are explicitly mentioned
 """
 
-
-# ─────────────────────────────────────────────────────────
-# Master Prompt Builder
-# ─────────────────────────────────────────────────────────
 
 def build_prompt(context_block: str, issue_type: str) -> str:
     type_rules = get_type_specific_rules(issue_type)
 
-    return f"""You are a senior QA engineer at a financial institution.
+    return f"""You are a senior QA engineer generating test cases from a Jira ticket.
 
-Your job is to generate precise, professional, domain-aware functional test cases
-from the Jira ticket context provided below.
+STRICT ANTI-HALLUCINATION RULES — these are absolute:
+1. Use ONLY information present in the JIRA CONTEXT below — nothing else
+2. Every test case title, step, and expected result must be directly traceable to the context
+3. Do NOT invent features, fields, endpoints, or behaviours not mentioned in the context
+4. Do NOT use generic phrases like "it should work" or "system works correctly"
+5. If description mentions a specific URL, field name, or error — use those exact terms
+6. If context is sparse — write fewer but accurate test cases, not more invented ones
+7. Never reference technology, frameworks, or systems not mentioned in the context
 
-Use ONLY what is in the context. Do not invent requirements.
-If context is sparse, generate fewer but accurate test cases.
-If context is rich, generate comprehensive coverage.
-
-RETURN ONLY valid JSON. No markdown. No explanation. No code fences.
+OUTPUT RULES:
+- Return ONLY valid JSON — no markdown, no code fences, no text before or after
+- Generate between 6 and 12 test cases
+- Always include at least 2 Negative and 1 Regression test case
 
 JSON SCHEMA:
 {{
-  "ticket_key": "...",
-  "summary": "...",
-  "issue_type": "...",
+  "ticket_key": "exact ticket key from context",
+  "summary": "exact summary from context",
+  "issue_type": "exact issue type from context",
   "risk_level": "Low | Medium | High | Critical",
   "test_suite": [
     {{
       "id": "TC-001",
       "category": "Functional | Edge Case | Negative | Integration | Regression | Reproduction",
-      "title": "Short, specific test title",
-      "preconditions": "Exact state required before test runs",
+      "title": "Specific title using exact terms from context",
+      "preconditions": "Exact state required — only mention systems/data in context",
       "steps": [
-        "Step 1: specific action",
+        "Step 1: specific action using terms from context",
         "Step 2: specific action",
-        "Step 3: verify specific outcome"
+        "Step 3: verify specific outcome from context"
       ],
-      "expected_result": "Specific, measurable, verifiable outcome",
+      "expected_result": "Specific measurable outcome using exact terms from context",
       "priority": "P1 | P2 | P3",
-      "tags": ["fix-version", "component", "label", "environment"]
+      "tags": ["from-context-labels-or-components"]
     }}
   ],
   "coverage_summary": {{
@@ -239,65 +290,242 @@ JSON SCHEMA:
     "regression": 0,
     "reproduction": 0
   }},
-  "qa_notes": "Key risks, dependencies, environment needs, and anything QA must know before testing"
+  "qa_notes": "Risks and dependencies — only from context"
 }}
 
-UNIVERSAL QUALITY RULES:
-- Generate between 6 and 15 test cases based on context richness
-- Steps must be concrete actions — not vague like "verify the system works"
-- Expected results must be specific and measurable — not "it should work"
-- At least 2 Negative test cases always required
-- At least 1 Regression test case always required
-- P1 = must pass before any release, P2 = important, P3 = nice to have
-- Tags must include fix version, labels, and issue type from the context
-- If attachments are mentioned, reference them in relevant preconditions
-- If comments contain requirements or decisions, honour them in test cases
-- If linked tickets exist, include at least 1 Integration test case
+PRIORITY RULES:
+- P1 = must pass before release
+- P2 = important
+- P3 = nice to have
 
 {type_rules}
 
-JIRA CONTEXT:
+JIRA CONTEXT — use only what is below, nothing else:
 {context_block}
 """
 
 
 # ─────────────────────────────────────────────────────────
-# Main Generator — called from Streamlit
+# Parse LLM response safely
 # ─────────────────────────────────────────────────────────
+def _parse_response(content: str) -> dict:
+    content = content.strip()
+    if content.startswith("```"):
+        lines = [l for l in content.split("\n") if not l.strip().startswith("```")]
+        content = "\n".join(lines).strip()
 
+    start = content.find("{")
+    end   = content.rfind("}") + 1
+    if start == -1 or end == 0:
+        raise ValueError("No JSON object found in response")
+
+    return json.loads(content[start:end])
+
+
+# ─────────────────────────────────────────────────────────
+# Recount coverage from actual suite — never trust LLM count
+# ─────────────────────────────────────────────────────────
+def _fix_coverage_summary(result: dict) -> dict:
+    suite   = result.get("test_suite", [])
+    cat_map = {
+        "functional": 0, "edge_cases": 0, "negative": 0,
+        "integration": 0, "regression": 0, "reproduction": 0,
+    }
+    for t in suite:
+        cat = (t.get("category") or "").lower().replace(" ", "_")
+        if cat in cat_map:
+            cat_map[cat] += 1
+        elif "edge" in cat:
+            cat_map["edge_cases"] += 1
+        elif "negative" in cat:
+            cat_map["negative"] += 1
+        else:
+            cat_map["functional"] += 1
+
+    result["coverage_summary"] = {
+        "total_cases":  len(suite),
+        **cat_map
+    }
+    return result
+
+
+# ─────────────────────────────────────────────────────────
+# Fallback — built purely from Jira context fields
+# No invented content — uses only what we know from ticket
+# ─────────────────────────────────────────────────────────
+def _make_fallback(ctx: dict) -> dict:
+    key        = ctx.get("key", "TC")
+    summary    = ctx.get("summary", "feature")
+    issue_type = ctx.get("issue_type", "Task")
+    env        = ctx.get("environment", "the target environment")
+    version    = (ctx.get("fix_versions") or ["the fix version"])[0]
+    component  = (ctx.get("components") or ["the component"])[0]
+    labels     = ctx.get("labels", [])
+    tags       = labels[:2] if labels else [issue_type.lower()]
+
+    suite = [
+        {
+            "id": f"{key}-TC-001",
+            "category": "Functional",
+            "title": f"Verify {summary} completes successfully",
+            "preconditions": f"System deployed to {env}, version {version} active",
+            "steps": [
+                f"Step 1: Navigate to {component}",
+                f"Step 2: Perform the action described in {key}: {summary[:60]}",
+                "Step 3: Verify the operation completes without errors"
+            ],
+            "expected_result": f"{summary[:80]} completes and system remains stable",
+            "priority": "P1",
+            "tags": tags
+        },
+        {
+            "id": f"{key}-TC-002",
+            "category": "Negative",
+            "title": f"Verify {summary} handles invalid input gracefully",
+            "preconditions": f"System deployed to {env}",
+            "steps": [
+                f"Step 1: Navigate to {component}",
+                "Step 2: Submit invalid or empty input",
+                "Step 3: Verify error handling"
+            ],
+            "expected_result": "Appropriate error message displayed, no system crash or data corruption",
+            "priority": "P1",
+            "tags": ["negative"] + tags
+        },
+        {
+            "id": f"{key}-TC-003",
+            "category": "Negative",
+            "title": f"Verify {summary} handles missing required data",
+            "preconditions": f"System deployed to {env}",
+            "steps": [
+                f"Step 1: Navigate to {component}",
+                "Step 2: Leave required fields empty and submit",
+                "Step 3: Verify validation response"
+            ],
+            "expected_result": "Validation error shown for missing required fields, no partial save",
+            "priority": "P2",
+            "tags": ["negative", "validation"] + tags
+        },
+        {
+            "id": f"{key}-TC-004",
+            "category": "Edge Case",
+            "title": f"Verify {summary} handles boundary and edge conditions",
+            "preconditions": f"System deployed to {env}, version {version}",
+            "steps": [
+                f"Step 1: Navigate to {component}",
+                "Step 2: Enter boundary value inputs (min/max/special characters)",
+                "Step 3: Verify system handles edge values correctly"
+            ],
+            "expected_result": "System handles boundary values without errors or unexpected behaviour",
+            "priority": "P2",
+            "tags": ["edge-case"] + tags
+        },
+        {
+            "id": f"{key}-TC-005",
+            "category": "Regression",
+            "title": f"Verify existing {component} functionality not broken by {key} changes",
+            "preconditions": f"Version {version} deployed to {env}",
+            "steps": [
+                f"Step 1: Test existing {component} functionality unrelated to {key}",
+                "Step 2: Verify all previously working features still work",
+                "Step 3: Check application logs for unexpected errors"
+            ],
+            "expected_result": f"All existing {component} functionality works as before — no regression",
+            "priority": "P1",
+            "tags": ["regression"] + tags
+        },
+        {
+            "id": f"{key}-TC-006",
+            "category": "Functional",
+            "title": f"Verify {key} deployment in {env} environment",
+            "preconditions": f"Version {version} deployed to {env}",
+            "steps": [
+                f"Step 1: Confirm version {version} is active in {env}",
+                f"Step 2: Execute smoke test for {summary[:60]}",
+                "Step 3: Verify no errors in deployment logs"
+            ],
+            "expected_result": f"Version {version} running in {env} with no deployment errors",
+            "priority": "P2",
+            "tags": ["smoke-test"] + tags
+        },
+    ]
+
+    return {
+        "ticket_key":  key,
+        "summary":     summary,
+        "issue_type":  issue_type,
+        "risk_level":  "Medium",
+        "test_suite":  suite,
+        "coverage_summary": {
+            "total_cases": 6, "functional": 2, "edge_cases": 1,
+            "negative": 2, "integration": 0, "regression": 1, "reproduction": 0,
+        },
+        "qa_notes": (
+            f"⚠️ Fallback test cases — generated from {key} context only "
+            f"({summary[:60]}). AI generation failed. Review and enhance manually."
+        )
+    }
+
+
+# ─────────────────────────────────────────────────────────
+# Main entry point — retry + validate + fallback
+# ─────────────────────────────────────────────────────────
 def generate_test_cases(jira_context: dict) -> dict:
-    """
-    Input:  full context dict from jira_context.build_full_ticket_context()
-    Output: structured test suite dict ready for Streamlit display
-    """
 
     context_block = format_context_for_prompt(jira_context)
     issue_type    = jira_context.get("issue_type", "Task")
     prompt        = build_prompt(context_block, issue_type)
 
-    response = requests.post(
-        BASE_URL,
-        headers={
-            "Authorization": f"Bearer {API_KEY}",
-            "Content-Type":  "application/json"
-        },
-        json={
-            "model":    MODEL,
-            "messages": [{"role": "user", "content": prompt}],
-            "temperature": 0.1
-        },
-        timeout=120
+    last_error = None
+
+    for attempt in range(3):
+        try:
+            if attempt > 0:
+                time.sleep(2 * attempt)
+
+            response = requests.post(
+                BASE_URL,
+                headers={
+                    "Authorization": f"Bearer {API_KEY}",
+                    "Content-Type":  "application/json"
+                },
+                json={
+                    "model":       MODEL,
+                    "messages":    [{"role": "user", "content": prompt}],
+                    "temperature": 0.0,   # zero temperature = no creativity = no hallucination
+                },
+                timeout=120
+            )
+            response.raise_for_status()
+
+            content = response.json()["choices"][0]["message"]["content"]
+            result  = _parse_response(content)
+
+            suite = result.get("test_suite", [])
+            if not suite:
+                raise ValueError("LLM returned empty test_suite")
+
+            # Strip hallucinated test cases
+            result = _validate_suite(result, jira_context)
+
+            # If too many stripped — retry
+            if len(result.get("test_suite", [])) < 3:
+                raise ValueError(
+                    f"Too many test cases failed validation "
+                    f"({len(suite)} generated, {len(result.get('test_suite',[]))} valid)"
+                )
+
+            # Recount coverage from actual valid suite
+            result = _fix_coverage_summary(result)
+            return result
+
+        except Exception as e:
+            last_error = e
+            continue
+
+    # All attempts failed — use fallback built from Jira context only
+    fallback = _make_fallback(jira_context)
+    fallback["qa_notes"] += (
+        f"\nGeneration error: {str(last_error)[:120]}"
     )
-
-    response.raise_for_status()
-
-    content = response.json()["choices"][0]["message"]["content"].strip()
-
-    # Strip markdown fences if model wraps output
-    if content.startswith("```"):
-        content = content.split("```")[1]
-        if content.startswith("json"):
-            content = content[4:]
-        content = content.strip()
-
-    return json.loads(content)
+    return fallback

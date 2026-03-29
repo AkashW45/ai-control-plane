@@ -73,6 +73,9 @@ TICKETS WITH FULL CONTEXT:
         headers={"Authorization": f"Bearer {API_KEY}", "Content-Type": "application/json"},
         json={"model": MODEL, "messages": [{"role": "user", "content": prompt}], "temperature": 0.1},
         timeout=60)
+    if not r.ok:
+        print("Groq status:", r.status_code)
+        print("Groq body:", r.text[:2000])
     r.raise_for_status()
     content = r.json()["choices"][0]["message"]["content"].strip()
     if content.startswith("```"):

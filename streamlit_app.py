@@ -780,285 +780,285 @@ else:
         st.divider()
 
         # ── Notify Teams ────────────────────────────────────
-        st.markdown("### 📣 Notify Team on Microsoft Teams")
+        # st.markdown("### 📣 Notify Team on Microsoft Teams")
 
-        teams_webhook_url = os.getenv("TEAMS_WEBHOOK_URL", "")
+        # teams_webhook_url = os.getenv("TEAMS_WEBHOOK_URL", "")
 
-        if not teams_webhook_url:
-            st.warning("⚠️ TEAMS_WEBHOOK_URL not set in .env")
-        else:
-            if st.button("📨 Send to Teams", type="primary", key="send_teams_btn"):
-                try:
-                    ticket_s      = st.session_state["ticket"]
-                    jira_key      = st.session_state.get("jira_key", ticket_s.get("key", ""))
-                    verdict_emoji = {"GO": "✅", "PAUSE": "⏸️", "ROLLBACK": "🔴"}.get(verdict, "⏸️")
+        # if not teams_webhook_url:
+        #     st.warning("⚠️ TEAMS_WEBHOOK_URL not set in .env")
+        # else:
+        #     if st.button("📨 Send to Teams", type="primary", key="send_teams_btn"):
+        #         try:
+        #             ticket_s      = st.session_state["ticket"]
+        #             jira_key      = st.session_state.get("jira_key", ticket_s.get("key", ""))
+        #             verdict_emoji = {"GO": "✅", "PAUSE": "⏸️", "ROLLBACK": "🔴"}.get(verdict, "⏸️")
 
-                    pa_payload = {
-                        "change_id": jira_key,
-                        "project":   ticket_s.get("project", ""),
-                        "status":    f"{verdict_emoji} {verdict}",
-                        "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M"),
-                    }
+        #             pa_payload = {
+        #                 "change_id": jira_key,
+        #                 "project":   ticket_s.get("project", ""),
+        #                 "status":    f"{verdict_emoji} {verdict}",
+        #                 "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M"),
+        #             }
 
-                    resp = requests.post(teams_webhook_url, json=pa_payload, timeout=10)
-                    if resp.status_code in (200, 202):
-                        st.success("✅ Sent to Teams")
-                    else:
-                        st.error(f"Failed: {resp.status_code}")
-                except Exception as e:
-                    st.error(str(e))
+        #             resp = requests.post(teams_webhook_url, json=pa_payload, timeout=10)
+        #             if resp.status_code in (200, 202):
+        #                 st.success("✅ Sent to Teams")
+        #             else:
+        #                 st.error(f"Failed: {resp.status_code}")
+        #         except Exception as e:
+        #             st.error(str(e))
 
-        st.divider()
+        # st.divider()
 
-        # ══════════════════════════════════════════════════════
-        # STAGE 5 — DEPLOY TO RUNDECK
-        # ══════════════════════════════════════════════════════
-        st.markdown("## Stage 5 · Deploy to Rundeck")
+        # # ══════════════════════════════════════════════════════
+        # # STAGE 5 — DEPLOY TO RUNDECK
+        # # ══════════════════════════════════════════════════════
+        # st.markdown("## Stage 5 · Deploy to Rundeck")
 
-        ticket_s = st.session_state["ticket"]
-        plan_s   = st.session_state["plan"]
-        groups   = plan_s.get("groups", [])
-        has_groups = len(groups) > 0
+        # ticket_s = st.session_state["ticket"]
+        # plan_s   = st.session_state["plan"]
+        # groups   = plan_s.get("groups", [])
+        # has_groups = len(groups) > 0
 
-        if has_groups:
-            st.caption(
-                f"**{len(groups)} ticket groups detected** — each group gets its own Rundeck job "
-                f"executed in order: migration → bugfix → testing → feature → deployment. "
-                f"If any group fails the chain stops."
-            )
-        else:
-            st.caption("Single deployment — all steps in one Rundeck job.")
+        # if has_groups:
+        #     st.caption(
+        #         f"**{len(groups)} ticket groups detected** — each group gets its own Rundeck job "
+        #         f"executed in order: migration → bugfix → testing → feature → deployment. "
+        #         f"If any group fails the chain stops."
+        #     )
+        # else:
+        #     st.caption("Single deployment — all steps in one Rundeck job.")
 
-        # ── Step 1: Config + preview + approval ───────────────
-        if "rundeck_group_results" not in st.session_state:
+        # # ── Step 1: Config + preview + approval ───────────────
+        # if "rundeck_group_results" not in st.session_state:
 
-            col_env, col_ver = st.columns(2)
-            with col_env:
-                run_env = st.selectbox("Environment", ["QA", "STAGING", "PROD"], key="run_env")
-            with col_ver:
-                run_ver = st.text_input(
-                    "Version",
-                    value=ticket_s.get("fixVersion", "auto"),
-                    key="run_ver"
-                )
+        #     col_env, col_ver = st.columns(2)
+        #     with col_env:
+        #         run_env = st.selectbox("Environment", ["QA", "STAGING", "PROD"], key="run_env")
+        #     with col_ver:
+        #         run_ver = st.text_input(
+        #             "Version",
+        #             value=ticket_s.get("fixVersion", "auto"),
+        #             key="run_ver"
+        #         )
 
-            # Preview — show groups or flat steps
-            if has_groups:
-                from services.rundeck import GROUP_ORDER
-                ordered = sorted(groups, key=lambda g: GROUP_ORDER.get(g.get("type","deployment"), 99))
-                st.markdown("#### Execution Order")
-                type_icon = {
-                    "migration":  "🗄️", "bugfix": "🐛",
-                    "feature":    "✨", "deployment": "🚀", "testing": "🧪"
-                }
-                for i, grp in enumerate(ordered, 1):
-                    gtype   = grp.get("type", "deployment")
-                    gname   = grp.get("name", gtype)
-                    tickets = ", ".join(grp.get("tickets", []))
-                    icon    = type_icon.get(gtype, "📦")
-                    with st.expander(
-                        f"{i}. {icon} {gname} `{gtype}` — Tickets: {tickets}",
-                        expanded=False
-                    ):
-                        if grp.get("pre_checks"):
-                            st.markdown("**Pre-checks:**")
-                            for c in grp["pre_checks"]:
-                                st.write(f"- {c}")
-                        if grp.get("steps"):
-                            st.markdown("**Steps:**")
-                            for step in grp["steps"]:
-                                st.write(f"**{step.get('description','')}**")
-                                for cmd in step.get("commands", []):
-                                    r = cmd.replace("{{ environment }}", run_env)\
-                                           .replace("{{ version }}", run_ver)\
-                                           .replace("{environment}", run_env)\
-                                           .replace("{version}", run_ver)
-                                    st.code(r, language="bash")
-                        if grp.get("validation"):
-                            st.markdown("**Validation:**")
-                            for v in grp["validation"]:
-                                st.write(f"- {v}")
-                        if grp.get("rollback"):
-                            st.error(f"**Rollback:** {grp['rollback']}")
-            else:
-                with st.expander("📋 What will be sent to Rundeck", expanded=False):
-                    for i, step in enumerate(plan_s.get("steps", []), 1):
-                        st.write(f"**{i}. {step.get('description','')}**")
-                        for cmd in step.get("commands", []):
-                            r = cmd.replace("{{ environment }}", run_env)\
-                                   .replace("{{ version }}", run_ver)\
-                                   .replace("{environment}", run_env)\
-                                   .replace("{version}", run_ver)
-                            st.code(r, language="bash")
+        #     # Preview — show groups or flat steps
+        #     if has_groups:
+        #         from services.rundeck import GROUP_ORDER
+        #         ordered = sorted(groups, key=lambda g: GROUP_ORDER.get(g.get("type","deployment"), 99))
+        #         st.markdown("#### Execution Order")
+        #         type_icon = {
+        #             "migration":  "🗄️", "bugfix": "🐛",
+        #             "feature":    "✨", "deployment": "🚀", "testing": "🧪"
+        #         }
+        #         for i, grp in enumerate(ordered, 1):
+        #             gtype   = grp.get("type", "deployment")
+        #             gname   = grp.get("name", gtype)
+        #             tickets = ", ".join(grp.get("tickets", []))
+        #             icon    = type_icon.get(gtype, "📦")
+        #             with st.expander(
+        #                 f"{i}. {icon} {gname} `{gtype}` — Tickets: {tickets}",
+        #                 expanded=False
+        #             ):
+        #                 if grp.get("pre_checks"):
+        #                     st.markdown("**Pre-checks:**")
+        #                     for c in grp["pre_checks"]:
+        #                         st.write(f"- {c}")
+        #                 if grp.get("steps"):
+        #                     st.markdown("**Steps:**")
+        #                     for step in grp["steps"]:
+        #                         st.write(f"**{step.get('description','')}**")
+        #                         for cmd in step.get("commands", []):
+        #                             r = cmd.replace("{{ environment }}", run_env)\
+        #                                    .replace("{{ version }}", run_ver)\
+        #                                    .replace("{environment}", run_env)\
+        #                                    .replace("{version}", run_ver)
+        #                             st.code(r, language="bash")
+        #                 if grp.get("validation"):
+        #                     st.markdown("**Validation:**")
+        #                     for v in grp["validation"]:
+        #                         st.write(f"- {v}")
+        #                 if grp.get("rollback"):
+        #                     st.error(f"**Rollback:** {grp['rollback']}")
+        #     else:
+        #         with st.expander("📋 What will be sent to Rundeck", expanded=False):
+        #             for i, step in enumerate(plan_s.get("steps", []), 1):
+        #                 st.write(f"**{i}. {step.get('description','')}**")
+        #                 for cmd in step.get("commands", []):
+        #                     r = cmd.replace("{{ environment }}", run_env)\
+        #                            .replace("{{ version }}", run_ver)\
+        #                            .replace("{environment}", run_env)\
+        #                            .replace("{version}", run_ver)
+        #                     st.code(r, language="bash")
 
-            st.markdown("**Confirm you have reviewed and approve execution:**")
-            approved = st.checkbox(
-                "✅ I approve — execute this runbook in Rundeck",
-                key="rundeck_approve"
-            )
+        #     st.markdown("**Confirm you have reviewed and approve execution:**")
+        #     approved = st.checkbox(
+        #         "✅ I approve — execute this runbook in Rundeck",
+        #         key="rundeck_approve"
+        #     )
 
-            if approved:
-                btn_label = (
-                    f"🚀 Execute {len(groups)} Group Jobs in Rundeck"
-                    if has_groups else
-                    "🚀 Import & Execute in Rundeck"
-                )
-                if st.button(btn_label, type="primary", key="run_rundeck_btn"):
-                    with st.spinner("Running in Rundeck..."):
-                        try:
-                            from services.rundeck_executor import RundeckExecutor
-                            executor = RundeckExecutor()
-                            options  = {
-                                "environment": run_env,
-                                "version":     run_ver,
-                                "dry_run":     "false"
-                            }
+        #     if approved:
+        #         btn_label = (
+        #             f"🚀 Execute {len(groups)} Group Jobs in Rundeck"
+        #             if has_groups else
+        #             "🚀 Import & Execute in Rundeck"
+        #         )
+        #         if st.button(btn_label, type="primary", key="run_rundeck_btn"):
+        #             with st.spinner("Running in Rundeck..."):
+        #                 try:
+        #                     from services.rundeck_executor import RundeckExecutor
+        #                     executor = RundeckExecutor()
+        #                     options  = {
+        #                         "environment": run_env,
+        #                         "version":     run_ver,
+        #                         "dry_run":     "false"
+        #                     }
 
-                            if has_groups:
-                                results = executor.run_groups(
-                                    ticket=ticket_s,
-                                    plan=plan_s,
-                                    options=options,
-                                    context={}
-                                )
-                                st.session_state["rundeck_group_results"] = results
-                            else:
-                                execution = executor.run(
-                                    ticket=ticket_s,
-                                    plan=plan_s,
-                                    options=options,
-                                    context={}
-                                )
-                                st.session_state["rundeck_group_results"] = [{
-                                    "group_name":    ticket_s.get("key", ""),
-                                    "group_type":    "deployment",
-                                    "tickets":       [ticket_s.get("key", "")],
-                                    "job_id":        None,
-                                    "execution_id":  execution["id"],
-                                    "execution_url": executor.get_execution_url(execution["id"]),
-                                    "status":        "SUCCEEDED",
-                                    "logs":          []
-                                }]
-                            st.rerun()
-                        except Exception as e:
-                            st.error(str(e))
+        #                     if has_groups:
+        #                         results = executor.run_groups(
+        #                             ticket=ticket_s,
+        #                             plan=plan_s,
+        #                             options=options,
+        #                             context={}
+        #                         )
+        #                         st.session_state["rundeck_group_results"] = results
+        #                     else:
+        #                         execution = executor.run(
+        #                             ticket=ticket_s,
+        #                             plan=plan_s,
+        #                             options=options,
+        #                             context={}
+        #                         )
+        #                         st.session_state["rundeck_group_results"] = [{
+        #                             "group_name":    ticket_s.get("key", ""),
+        #                             "group_type":    "deployment",
+        #                             "tickets":       [ticket_s.get("key", "")],
+        #                             "job_id":        None,
+        #                             "execution_id":  execution["id"],
+        #                             "execution_url": executor.get_execution_url(execution["id"]),
+        #                             "status":        "SUCCEEDED",
+        #                             "logs":          []
+        #                         }]
+        #                     st.rerun()
+        #                 except Exception as e:
+        #                     st.error(str(e))
 
-        # ── Step 2: Results per group ─────────────────────────
-        if "rundeck_group_results" in st.session_state:
-            results = st.session_state["rundeck_group_results"]
+        # # ── Step 2: Results per group ─────────────────────────
+        # if "rundeck_group_results" in st.session_state:
+        #     results = st.session_state["rundeck_group_results"]
 
-            status_icon = {
-                "SUCCEEDED":  "✅", "FAILED":  "❌",
-                "SKIPPED":    "⏭️", "ERROR":   "💥",
-                "RUNNING":    "⏳", "UNKNOWN": "❓"
-            }
-            type_icon = {
-                "migration":  "🗄️", "bugfix":     "🐛",
-                "feature":    "✨", "deployment": "🚀",
-                "testing":    "🧪", "validation": "🔍"
-            }
+        #     status_icon = {
+        #         "SUCCEEDED":  "✅", "FAILED":  "❌",
+        #         "SKIPPED":    "⏭️", "ERROR":   "💥",
+        #         "RUNNING":    "⏳", "UNKNOWN": "❓"
+        #     }
+        #     type_icon = {
+        #         "migration":  "🗄️", "bugfix":     "🐛",
+        #         "feature":    "✨", "deployment": "🚀",
+        #         "testing":    "🧪", "validation": "🔍"
+        #     }
 
-            # Separate deployment groups from validation result
-            group_results      = [r for r in results if r["group_type"] != "validation"]
-            validation_results = [r for r in results if r["group_type"] == "validation"]
+        #     # Separate deployment groups from validation result
+        #     group_results      = [r for r in results if r["group_type"] != "validation"]
+        #     validation_results = [r for r in results if r["group_type"] == "validation"]
 
-            all_groups_ok   = all(r["status"] == "SUCCEEDED" for r in group_results)
-            any_failed      = any(r["status"] in ("FAILED", "ERROR") for r in group_results)
-            validation_done = len(validation_results) > 0
-            validation_ok   = validation_done and validation_results[0]["status"] == "SUCCEEDED"
+        #     all_groups_ok   = all(r["status"] == "SUCCEEDED" for r in group_results)
+        #     any_failed      = any(r["status"] in ("FAILED", "ERROR") for r in group_results)
+        #     validation_done = len(validation_results) > 0
+        #     validation_ok   = validation_done and validation_results[0]["status"] == "SUCCEEDED"
 
-            # ── Overall banner ────────────────────────────────
-            if all_groups_ok and validation_ok:
-                st.success("## ✅ All groups deployed + post-deployment validation passed")
-            elif all_groups_ok and validation_done and not validation_ok:
-                st.warning("## ⚠️ Deployment succeeded but post-deployment validation failed")
-            elif any_failed:
-                st.error("## ❌ One or more groups failed — chain stopped")
-            elif all_groups_ok and not validation_done:
-                st.success("## ✅ All groups executed successfully")
-            else:
-                st.warning("## ⚠️ Execution complete with skipped groups")
+        #     # ── Overall banner ────────────────────────────────
+        #     if all_groups_ok and validation_ok:
+        #         st.success("## ✅ All groups deployed + post-deployment validation passed")
+        #     elif all_groups_ok and validation_done and not validation_ok:
+        #         st.warning("## ⚠️ Deployment succeeded but post-deployment validation failed")
+        #     elif any_failed:
+        #         st.error("## ❌ One or more groups failed — chain stopped")
+        #     elif all_groups_ok and not validation_done:
+        #         st.success("## ✅ All groups executed successfully")
+        #     else:
+        #         st.warning("## ⚠️ Execution complete with skipped groups")
 
-            # ── Group results ─────────────────────────────────
-            st.markdown("#### Group Execution Results")
-            for r in group_results:
-                si    = status_icon.get(r["status"], "❓")
-                ti    = type_icon.get(r["group_type"], "📦")
-                label = (
-                    f"{si} {ti} **{r['group_name']}** `{r['group_type']}` "
-                    f"— Tickets: {', '.join(r['tickets'])} — **{r['status']}**"
-                )
-                with st.expander(label, expanded=(r["status"] in ("FAILED", "ERROR"))):
-                    if r.get("execution_url"):
-                        st.markdown(f"🔗 [View execution in Rundeck]({r['execution_url']})")
-                    if r.get("error"):
-                        st.error(f"Error: {r['error']}")
-                    if r["status"] == "SKIPPED":
-                        st.info("Skipped — previous group failed")
-                    clean_lines = [
-                        e.get("log", "").rstrip()
-                        for e in r.get("logs", [])
-                        if e.get("log", "").strip()
-                    ]
-                    if clean_lines:
-                        st.code("\n".join(clean_lines), language="bash")
+        #     # ── Group results ─────────────────────────────────
+        #     st.markdown("#### Group Execution Results")
+        #     for r in group_results:
+        #         si    = status_icon.get(r["status"], "❓")
+        #         ti    = type_icon.get(r["group_type"], "📦")
+        #         label = (
+        #             f"{si} {ti} **{r['group_name']}** `{r['group_type']}` "
+        #             f"— Tickets: {', '.join(r['tickets'])} — **{r['status']}**"
+        #         )
+        #         with st.expander(label, expanded=(r["status"] in ("FAILED", "ERROR"))):
+        #             if r.get("execution_url"):
+        #                 st.markdown(f"🔗 [View execution in Rundeck]({r['execution_url']})")
+        #             if r.get("error"):
+        #                 st.error(f"Error: {r['error']}")
+        #             if r["status"] == "SKIPPED":
+        #                 st.info("Skipped — previous group failed")
+        #             clean_lines = [
+        #                 e.get("log", "").rstrip()
+        #                 for e in r.get("logs", [])
+        #                 if e.get("log", "").strip()
+        #             ]
+        #             if clean_lines:
+        #                 st.code("\n".join(clean_lines), language="bash")
 
-            # ── Post-deployment validation result ─────────────
-            if validation_results:
-                vr = validation_results[0]
-                st.markdown("#### 🔍 Post-Deployment Validation")
-                si = status_icon.get(vr["status"], "❓")
-                with st.expander(
-                    f"{si} **{vr['group_name']}** — **{vr['status']}**",
-                    expanded=True
-                ):
-                    if vr.get("execution_url"):
-                        st.markdown(f"🔗 [View validation execution in Rundeck]({vr['execution_url']})")
-                    if vr.get("error"):
-                        st.error(f"Error: {vr['error']}")
-                    clean_lines = [
-                        e.get("log", "").rstrip()
-                        for e in vr.get("logs", [])
-                        if e.get("log", "").strip()
-                    ]
-                    if clean_lines:
-                        st.code("\n".join(clean_lines), language="bash")
+        #     # ── Post-deployment validation result ─────────────
+        #     if validation_results:
+        #         vr = validation_results[0]
+        #         st.markdown("#### 🔍 Post-Deployment Validation")
+        #         si = status_icon.get(vr["status"], "❓")
+        #         with st.expander(
+        #             f"{si} **{vr['group_name']}** — **{vr['status']}**",
+        #             expanded=True
+        #         ):
+        #             if vr.get("execution_url"):
+        #                 st.markdown(f"🔗 [View validation execution in Rundeck]({vr['execution_url']})")
+        #             if vr.get("error"):
+        #                 st.error(f"Error: {vr['error']}")
+        #             clean_lines = [
+        #                 e.get("log", "").rstrip()
+        #                 for e in vr.get("logs", [])
+        #                 if e.get("log", "").strip()
+        #             ]
+        #             if clean_lines:
+        #                 st.code("\n".join(clean_lines), language="bash")
 
-            # ── Teams summary notification ────────────────────
-            st.divider()
-            st.markdown("#### 📣 Send Deployment Summary to Teams")
-            teams_webhook_url = os.getenv("TEAMS_WEBHOOK_URL", "")
-            if not teams_webhook_url:
-                st.caption("⚠️ TEAMS_WEBHOOK_URL not set in .env")
-            else:
-                if st.button("📨 Send Full Summary to Teams", key="teams_summary_btn"):
-                    try:
-                        overall = (
-                            "✅ SUCCEEDED" if (all_groups_ok and (not validation_done or validation_ok))
-                            else "❌ FAILED"
-                        )
-                        summary_lines = [
-                            f"{r['group_name']} ({r['group_type']}): {r['status']}"
-                            for r in results
-                        ]
-                        payload = {
-                            "change_id":   ticket_s.get("key", ""),
-                            "project":     ticket_s.get("project", ""),
-                            "status":      overall,
-                            "summary":     " | ".join(summary_lines),
-                            "timestamp":   datetime.now().strftime("%Y-%m-%d %H:%M"),
-                        }
-                        resp = requests.post(teams_webhook_url, json=payload, timeout=10)
-                        if resp.status_code in (200, 202):
-                            st.success("✅ Summary sent to Teams")
-                        else:
-                            st.error(f"Failed: {resp.status_code}")
-                    except Exception as e:
-                        st.error(str(e))
+        #     # ── Teams summary notification ────────────────────
+        #     st.divider()
+        #     st.markdown("#### 📣 Send Deployment Summary to Teams")
+        #     teams_webhook_url = os.getenv("TEAMS_WEBHOOK_URL", "")
+        #     if not teams_webhook_url:
+        #         st.caption("⚠️ TEAMS_WEBHOOK_URL not set in .env")
+        #     else:
+        #         if st.button("📨 Send Full Summary to Teams", key="teams_summary_btn"):
+        #             try:
+        #                 overall = (
+        #                     "✅ SUCCEEDED" if (all_groups_ok and (not validation_done or validation_ok))
+        #                     else "❌ FAILED"
+        #                 )
+        #                 summary_lines = [
+        #                     f"{r['group_name']} ({r['group_type']}): {r['status']}"
+        #                     for r in results
+        #                 ]
+        #                 payload = {
+        #                     "change_id":   ticket_s.get("key", ""),
+        #                     "project":     ticket_s.get("project", ""),
+        #                     "status":      overall,
+        #                     "summary":     " | ".join(summary_lines),
+        #                     "timestamp":   datetime.now().strftime("%Y-%m-%d %H:%M"),
+        #                 }
+        #                 resp = requests.post(teams_webhook_url, json=payload, timeout=10)
+        #                 if resp.status_code in (200, 202):
+        #                     st.success("✅ Summary sent to Teams")
+        #                 else:
+        #                     st.error(f"Failed: {resp.status_code}")
+        #             except Exception as e:
+        #                 st.error(str(e))
 
-            if st.button("🔄 Reset & Run Again", key="rundeck_reset_btn"):
-                st.session_state.pop("rundeck_group_results", None)
-                st.rerun()
+        #     if st.button("🔄 Reset & Run Again", key="rundeck_reset_btn"):
+        #         st.session_state.pop("rundeck_group_results", None)
+        #         st.rerun()
 
         st.divider()
         st.markdown("### Pipeline Complete")
